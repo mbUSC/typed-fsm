@@ -11,6 +11,45 @@ readme = "README.md"
 keywords = ["fsm", "state-machine", "embedded", "no-std", "isr"]
 categories = ["embedded", "no-std", "concurrency"]
 
+[[example]]
+name = "motor"
+path = "examples/motor.rs"
+
+[[example]]
+name = "traffic_light"
+path = "examples/traffic_light.rs"
+
+[[example]]
+name = "connection"
+path = "examples/connection.rs"
+
+[[example]]
+name = "guards"
+path = "examples/guards.rs"
+
+[[example]]
+name = "logging"
+path = "examples/logging.rs"
+
+[[example]]
+name = "timeouts"
+path = "examples/timeouts.rs"
+
+[[example]]
+name = "concurrent_isr"
+path = "examples/concurrent_isr.rs"
+required-features = ["concurrent"]
+
+[[example]]
+name = "concurrent_threads"
+path = "examples/concurrent_threads.rs"
+required-features = ["concurrent"]
+
+[[example]]
+name = "mermaid_diagrams"
+path = "examples/mermaid_diagrams.rs"
+required-features = ["diagram"]
+
 [features]
 default = []
 concurrent = ["heapless", "critical-section", "portable-atomic", "paste"]
@@ -29,7 +68,7 @@ paste = { version = "1.0", optional = true }
 log = { version = "0.4", optional = true }
 
 # Diagram generation (optional)
-diagram-generation = { path = "./diagram-generation", optional = true }
+diagram-generation = { path = "./src/diagram-generation", optional = true }
 mermaid-builder = { git = "ssh://git@github.com/mbUSC/mermaid-builder.git", optional = true }
 
 [dev-dependencies]
@@ -41,5 +80,5 @@ critical-section = { version = "1.1", features = ["std"] }
 [workspace]
 members = [
     ".",
-    "diagram-generation",
+    "src/diagram-generation",
 ]
