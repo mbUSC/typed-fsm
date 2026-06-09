@@ -4,68 +4,42 @@ version = "0.4.8"
 edition = "2021"
 rust-version = "1.75.0"
 authors = ["Afonso Miguel"]
-description = "Event-driven FSM with ISR-safe dispatch for embedded systems. Zero-cost, no_std, type-safe state machines with interrupt and concurrency support."
-readme = "README.md"
-repository = "https://github.com/afmiguel/typed-fsm"
+description = "Event-driven FSM with ISR-safe dispatch for embedded systems. Zero-cost, no_std, type-safe."
 license = "MIT OR Apache-2.0"
-keywords = ["fsm", "state-machine", "embedded", "interrupt", "concurrency"]
-categories = ["embedded", "no-std", "data-structures", "concurrency"]
-
-[lib]
-name = "typed_fsm"
-path = "src/lib.rs"
-
-[[example]]
-name = "motor"
-path = "examples/motor.rs"
-
-[[example]]
-name = "traffic_light"
-path = "examples/traffic_light.rs"
-
-[[example]]
-name = "connection"
-path = "examples/connection.rs"
-
-[[example]]
-name = "guards"
-path = "examples/guards.rs"
-
-[[example]]
-name = "logging"
-path = "examples/logging.rs"
-
-[[example]]
-name = "timeouts"
-path = "examples/timeouts.rs"
-
-[[example]]
-name = "concurrent_isr"
-path = "examples/concurrent_isr.rs"
-required-features = ["concurrent"]
-
-[[example]]
-name = "concurrent_threads"
-path = "examples/concurrent_threads.rs"
-required-features = ["concurrent"]
+repository = "https://github.com/afonso360/typed-fsm"
+readme = "README.md"
+keywords = ["fsm", "state-machine", "embedded", "no-std", "isr"]
+categories = ["embedded", "no-std", "concurrency"]
 
 [features]
 default = []
+concurrent = ["heapless", "critical-section", "portable-atomic", "paste"]
 logging = ["log"]
-concurrent = ["critical-section", "heapless", "paste", "portable-atomic"]
+diagram = ["dep:diagram-generation", "dep:mermaid-builder", "std"]
+std = []
 
 [dependencies]
-# Optional logging support
+# Concurrency support (optional)
+heapless = { version = "0.8", default-features = false, optional = true }
+critical-section = { version = "1.1", optional = true }
+portable-atomic = { version = "1.6", optional = true }
+paste = { version = "1.0", optional = true }
+
+# Logging (optional)
 log = { version = "0.4", optional = true }
 
-# Optional concurrency support (ISR + Multithreading)
-critical-section = { version = "1.1", optional = true }
-heapless = { version = "0.8", optional = true }
-paste = { version = "1.0", optional = true }
-portable-atomic = { version = "1.0", optional = true, default-features = false, features = ["critical-section"] }
+# Diagram generation (optional)
+diagram-generation = { path = "./diagram-generation", optional = true }
+mermaid-builder = { git = "ssh://git@github.com/mbUSC/mermaid-builder.git", optional = true }
 
 [dev-dependencies]
 env_logger = "0.11"
 log = "0.4"
 # critical-section implementation for tests (std-based)
 critical-section = { version = "1.1", features = ["std"] }
+
+[workspace]
+members = [
+    ".",
+    "diagram-generation",
+]
