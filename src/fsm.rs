@@ -85,7 +85,7 @@ pub mod diagram_helpers {
         fn default() -> Self {
             Self {
                 mode: DiagramMode::Hierarchical,
-                breakdown: BreakdownMode::None,
+                breakdown: BreakdownMode::Both,
                 excluded_types: &[],
             }
         }

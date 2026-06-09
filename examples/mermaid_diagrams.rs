@@ -73,5 +73,13 @@ fn main() {
     println!("   - Created: target/fsm_diagrams/hierarchical_and_flat_and_nested_breakdown/breakdown_flat/");
     println!("   - Created: target/fsm_diagrams/hierarchical_and_flat_and_nested_breakdown/breakdown_nested/\n");
 
+    // 6. default (Hierarchical + BreakdownMode::Both)
+    println!("6. Exporting with 'default' options (Hierarchical + Both breakdowns)...");
+    let options = DiagramOptions::default();
+    PlayerFSM::save_diagrams_ext("target/fsm_diagrams/default", &options).expect("Failed default");
+    println!("   - Created: target/fsm_diagrams/default/PlayerFSM.mermaid");
+    println!("   - Created: target/fsm_diagrams/default/breakdown_flat/");
+    println!("   - Created: target/fsm_diagrams/default/breakdown_nested/\n");
+
     println!("✅ All diagrams exported successfully!");
 }
