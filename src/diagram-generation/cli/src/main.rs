@@ -131,6 +131,13 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    // Clean start: Delete output directory if it exists to remove stale diagrams
+    if Path::new(&output_dir).exists() {
+        println!("Cleaning output directory: {}", output_dir);
+        fs::remove_dir_all(&output_dir)?;
+    }
+    fs::create_dir_all(&output_dir)?;
+
     println!("Found {} FSM definitions.", finder.found.len());
     let fsm_map: HashMap<String, &FsmDefinition> = finder.found.iter().map(|f| (f.name.to_string(), f)).collect();
 
