@@ -1,0 +1,15 @@
+# typed-fsm Global Configuration
+
+[mermaid]
+# Where the CLI tool should save generated diagrams
+output_dir = "target/docs/diagrams"
+
+# Rendering mode: "Hierarchical" (nested states) or "Simple"
+mode = "Hierarchical"
+
+# Which sub-FSM files to generate in addition to the main file:
+# "None"   - Only generate the main FSM file
+# "Flat"   - Generate a 'breakdown' folder with single-level sub-FSMs
+# "Nested" - Generate a 'breakdown' folder with hierarchical sub-FSMs
+# "Both"   - Generate both 'breakdown_flat' and 'breakdown_nested' folders
+breakdown = "Both"

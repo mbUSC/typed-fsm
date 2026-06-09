@@ -52,7 +52,7 @@ pub mod diagram_helpers {
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum DiagramMode {
         /// Each FSM is rendered as a single-level diagram (no nesting).
-        Flat,
+        Simple,
         /// Sub-FSMs are visually nested within their parent states.
         Hierarchical,
     }
