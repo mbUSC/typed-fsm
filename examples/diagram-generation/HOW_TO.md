@@ -17,6 +17,7 @@ You can control the CLI's behavior globally by placing a `.typed-fsm.toml` file 
 
 ```toml
 [mermaid]
+scan_dir = "src"       # Where to scan for FSMs (directory or single file)
 output_dir = "docs/diagrams"
 mode = "Hierarchical" # Options: "Simple" (single level) | "Hierarchical" (nested states)
 breakdown = "Both"    # Options: "None" | "Flat" | "Nested" | "Both"

@@ -11,8 +11,8 @@ use typed_fsm_diagram_core::{FsmDefinition, generate_mermaid_simple, generate_me
 #[command(author, version, about, long_about = None)]
 struct Args {
     /// Source directory or file to scan for state_machine! macros
-    #[arg(short, long, default_value = "src")]
-    src: String,
+    #[arg(short, long)]
+    src: Option<String>,
 
     /// Path to the configuration file
     #[arg(short, long)]
@@ -45,6 +45,8 @@ enum BreakdownMode {
 
 #[derive(Deserialize, Debug)]
 struct MermaidConfig {
+    #[serde(default = "default_scan_dir")]
+    scan_dir: String,
     #[serde(default = "default_output_dir")]
     output_dir: String,
     #[serde(default = "default_mode")]
@@ -56,6 +58,7 @@ struct MermaidConfig {
 impl Default for MermaidConfig {
     fn default() -> Self {
         Self {
+            scan_dir: default_scan_dir(),
             output_dir: default_output_dir(),
             mode: default_mode(),
             breakdown: default_breakdown(),
@@ -63,9 +66,10 @@ impl Default for MermaidConfig {
     }
 }
 
-fn default_output_dir() -> String { "docs/diagrams".to_string() }
+fn default_scan_dir() -> String { "src".to_string() }
+fn default_output_dir() -> String { "target/docs/diagrams".to_string() }
 fn default_mode() -> DiagramMode { DiagramMode::Hierarchical }
-fn default_breakdown() -> BreakdownMode { BreakdownMode::Both }
+fn default_breakdown() -> BreakdownMode { BreakdownMode::Flat }
 
 struct FsmFinder {
     found: Vec<FsmDefinition>,
@@ -101,14 +105,15 @@ fn main() -> anyhow::Result<()> {
         Config::default()
     };
     
-    let base_output_dir = args.output.unwrap_or(config.mermaid.output_dir.clone());
+    let output_dir = args.output.unwrap_or(config.mermaid.output_dir.clone());
+    let src_input = args.src.unwrap_or(config.mermaid.scan_dir.clone());
     
-    let src_path = Path::new(&args.src);
+    let src_path = Path::new(&src_input);
     if !src_path.exists() {
-        anyhow::bail!("Error: Source path '{}' does not exist.", args.src);
+        anyhow::bail!("Error: Source path '{}' does not exist.", src_input);
     }
 
-    println!("Scanning {} for state_machine! macros...", args.src);
+    println!("Scanning {} for state_machine! macros...", src_input);
     let mut finder = FsmFinder { found: vec![] };
 
     if src_path.is_file() {
@@ -148,10 +153,8 @@ fn main() -> anyhow::Result<()> {
     }
 
     let root_fsms: Vec<&FsmDefinition> = if src_path.is_file() {
-        // If processing a single file, treat all FSMs in it as "roots" for output organization
         finder.found.iter().collect()
     } else {
-        // If processing a directory, only treat actual roots as top-level directories
         finder.found.iter()
             .filter(|f| !all_children.contains(&f.name.to_string()))
             .collect()
@@ -161,14 +164,13 @@ fn main() -> anyhow::Result<()> {
 
     for fsm in root_fsms {
         let name = fsm.name.to_string();
-        let fsm_output_dir = Path::new(&base_output_dir).join(&name);
+        let fsm_output_dir = Path::new(&output_dir).join(&name);
         fs::create_dir_all(&fsm_output_dir)?;
-        // Respect 'mode' config
+        
         let content = match config.mermaid.mode {
             DiagramMode::Simple => generate_mermaid_simple(fsm),
             DiagramMode::Hierarchical => generate_mermaid_hierarchical(fsm, &fsm_map),
         };
-
         
         let path = fsm_output_dir.join(format!("{}.mermaid", name));
         fs::write(&path, content)?;
