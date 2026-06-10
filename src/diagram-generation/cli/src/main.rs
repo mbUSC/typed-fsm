@@ -9,7 +9,7 @@ use walkdir::WalkDir;
 use typed_fsm_diagram_core::{FsmDefinition, generate_mermaid_simple, generate_mermaid_hierarchical, SubFsmVisitor};
 
 #[derive(Parser, Debug)]
-#[command(author, version, about, long_about = None)]
+#[command(author, version, about, long_about = None, rename_all = "snake_case")]
 struct Args {
     /// Source directory or file to scan for state_machine! macros
     #[arg(short, long)]
@@ -22,6 +22,16 @@ struct Args {
     /// Override the output directory specified in the config
     #[arg(short, long)]
     output: Option<String>,
+
+    /// Include guards in the generated diagrams
+    #[arg(
+        long = "include-guards",
+        alias = "include_guards",
+        num_args = 0..=1, 
+        default_missing_value = "true", 
+        value_parser = clap::builder::BoolishValueParser::new()
+    )]
+    include_guards: Option<bool>,
 }
 
 #[derive(Deserialize, Debug, Default)]
@@ -54,6 +64,8 @@ struct MermaidConfig {
     mode: DiagramMode,
     #[serde(default = "default_breakdown")]
     breakdown: BreakdownMode,
+    #[serde(default)]
+    include_guards: bool,
 }
 
 impl Default for MermaidConfig {
@@ -63,6 +75,7 @@ impl Default for MermaidConfig {
             output_dir: default_output_dir(),
             mode: default_mode(),
             breakdown: default_breakdown(),
+            include_guards: true,
         }
     }
 }
@@ -126,6 +139,7 @@ fn main() -> anyhow::Result<()> {
     
     let output_dir = args.output.unwrap_or(config.mermaid.output_dir.clone());
     let src_input = args.scan.unwrap_or(config.mermaid.scan_dir.clone());
+    let include_guards = args.include_guards.unwrap_or(config.mermaid.include_guards);
     
     let src_path = Path::new(&src_input);
     if !src_path.exists() {
@@ -209,8 +223,8 @@ fn main() -> anyhow::Result<()> {
         fs::create_dir_all(&fsm_output_dir)?;
         
         let content = match config.mermaid.mode {
-            DiagramMode::Simple => generate_mermaid_simple(fsm),
-            DiagramMode::Hierarchical => generate_mermaid_hierarchical(fsm, &fsm_map, &finder.found_structs),
+            DiagramMode::Simple => generate_mermaid_simple(fsm, include_guards),
+            DiagramMode::Hierarchical => generate_mermaid_hierarchical(fsm, &fsm_map, &finder.found_structs, include_guards),
         };
         
         let path = fsm_output_dir.join(format!("{}.mermaid", name));
@@ -218,11 +232,11 @@ fn main() -> anyhow::Result<()> {
         println!("Generated root: {}", path.display());
 
         match config.mermaid.breakdown {
-            BreakdownMode::Flat => save_breakdown(fsm, &fsm_map, &finder.found_structs, &fsm_output_dir, "breakdown", false)?,
-            BreakdownMode::Nested => save_breakdown(fsm, &fsm_map, &finder.found_structs, &fsm_output_dir, "breakdown", true)?,
+            BreakdownMode::Flat => save_breakdown(fsm, &fsm_map, &finder.found_structs, &fsm_output_dir, "breakdown", false, include_guards)?,
+            BreakdownMode::Nested => save_breakdown(fsm, &fsm_map, &finder.found_structs, &fsm_output_dir, "breakdown", true, include_guards)?,
             BreakdownMode::Both => {
-                save_breakdown(fsm, &fsm_map, &finder.found_structs, &fsm_output_dir, "breakdown_flat", false)?;
-                save_breakdown(fsm, &fsm_map, &finder.found_structs, &fsm_output_dir, "breakdown_nested", true)?;
+                save_breakdown(fsm, &fsm_map, &finder.found_structs, &fsm_output_dir, "breakdown_flat", false, include_guards)?;
+                save_breakdown(fsm, &fsm_map, &finder.found_structs, &fsm_output_dir, "breakdown_nested", true, include_guards)?;
             },
             BreakdownMode::None => {},
         }
@@ -237,7 +251,8 @@ fn save_breakdown(
     struct_map: &HashMap<String, HashMap<String, String>>,
     fsm_output_dir: &Path, 
     sub_dir: &str, 
-    nested: bool
+    nested: bool,
+    include_guards: bool,
 ) -> anyhow::Result<()> {
     let mut discovered = HashSet::new();
     collect_all_subfsms(fsm, all_fsms, struct_map, &mut discovered);
@@ -252,9 +267,9 @@ fn save_breakdown(
     for sub_name in discovered {
         if let Some(sub_fsm) = all_fsms.get(&sub_name) {
             let content = if nested {
-                generate_mermaid_hierarchical(sub_fsm, all_fsms, struct_map)
+                generate_mermaid_hierarchical(sub_fsm, all_fsms, struct_map, include_guards)
             } else {
-                generate_mermaid_simple(sub_fsm)
+                generate_mermaid_simple(sub_fsm, include_guards)
             };
             let path = target_dir.join(format!("{}.mermaid", sub_name));
             fs::write(path, content)?;

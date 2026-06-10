@@ -72,15 +72,21 @@ pub fn generate_diagram(input: TokenStream) -> TokenStream {
             nodes.insert(#state_name_str, node);
         });
 
-        let mut visitor = TransitionVisitor::new(fsm_name.to_string(), state_name_str.clone());
-        visitor.visit_expr(&state.process_block);
+        // Collect transitions twice to support toggling guards at runtime
+        let mut visitor_full = TransitionVisitor::new(fsm_name_str.clone(), state_name_str.clone(), true);
+        visitor_full.visit_expr(&state.process_block);
         
-        for trans in visitor.transitions {
-            let src = trans.source;
-            let target = trans.target;
-            let label = trans.label;
+        let mut visitor_clean = TransitionVisitor::new(fsm_name_str.clone(), state_name_str.clone(), false);
+        visitor_clean.visit_expr(&state.process_block);
+        
+        for (full, clean) in visitor_full.transitions.into_iter().zip(visitor_clean.transitions.into_iter()) {
+            let src = full.source;
+            let target = full.target;
+            let label_full = full.label;
+            let label_clean = clean.label;
             edge_defs.push(quote! {
-                all_edges.push((#src, #target, #label));
+                let label = if options.include_guards { #label_full } else { #label_clean };
+                all_edges.push((#src, #target, label));
             });
         }
     }

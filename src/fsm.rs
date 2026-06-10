@@ -79,6 +79,8 @@ pub mod diagram_helpers {
         pub breakdown: BreakdownMode,
         /// List of FSM type names to exclude from generation.
         pub excluded_types: &'static [&'static str],
+        /// Whether to include transition guards in the diagram.
+        pub include_guards: bool,
     }
 
     impl Default for DiagramOptions {
@@ -87,6 +89,7 @@ pub mod diagram_helpers {
                 mode: DiagramMode::Hierarchical,
                 breakdown: BreakdownMode::Both,
                 excluded_types: &[],
+                include_guards: true,
             }
         }
     }

@@ -17,5 +17,5 @@ mode = "Hierarchical"
 # "Both"   - Generate both 'breakdown_flat' and 'breakdown_nested' folders
 breakdown = "Flat"
 
-# Whether to include transition guards in the diagram.
+# Include or exclude transition guards
 include_guards = true
