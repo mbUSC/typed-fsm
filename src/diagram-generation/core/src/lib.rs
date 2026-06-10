@@ -1,6 +1,6 @@
 use mermaid_builder::prelude::*;
 use ra_ap_syntax::{
-    ast::{self, AstNode, HasArgList, HasGenericArgs},
+    ast::{self, AstNode, HasArgList, HasGenericArgs, HasName},
     match_ast, Edition, SourceFile, SyntaxKind, SyntaxNode, SyntaxToken, T,
 };
 use std::collections::{HashMap, HashSet};
@@ -763,78 +763,124 @@ impl<'a> Cursor<'a> {
     }
 }
 
-/// Append `tokens[*j]` to `text` (with original spacing rules) and advance.
-fn push_and_advance(tokens: &[SyntaxToken], j: &mut usize, text: &mut String) {
-    text.push_str(tokens[*j].text());
-    if *j + 1 < tokens.len()
-        && !tokens[*j + 1].kind().is_punct()
-        && !tokens[*j].kind().is_punct()
-    {
-        text.push(' ');
+/// Join `tokens` back into a single source-text string, using the same
+/// spacing rule the original cursor-based parser used: a single space between
+/// adjacent non-punct tokens. The result is whitespace-stripped (no leading,
+/// trailing, or multiple spaces) and re-parseable by ra_ap_syntax.
+fn reconstruct_tokens(tokens: &[SyntaxToken]) -> String {
+    let mut out = String::new();
+    for (i, tok) in tokens.iter().enumerate() {
+        out.push_str(tok.text());
+        if i + 1 < tokens.len()
+            && !tokens[i + 1].kind().is_punct()
+            && !tok.kind().is_punct()
+        {
+            out.push(' ');
+        }
     }
-    *j += 1;
+    out
 }
 
-/// Parse a lifecycle value structurally as `|args| { body }`.
-///
-/// This is the structural replacement for the old pipe-counter hack. The FSM
-/// macro's lifecycle hooks (entry/process/exit) are always block-bodied
-/// closures, so the shape we expect is:
-///
-///   1. `|`                — opens args
-///   2. tokens until `|`   — the args (single closure has no nested `|`s)
-///   3. `|`                — closes args
-///   4. `{`                — opens block body
-///   5. balanced tokens    — body, possibly containing more `{}` and `|`s
-///   6. `}`                — closes block body
-///
-/// Returns `Some(text)` with the full captured closure text (including the
-/// outer `|args|{...}`) and advances `*j` past it. Returns `None` if the
-/// value isn't shaped as a block-body closure — in that case `*j` is left
-/// pointing at the offending token so the caller can recover.
-fn parse_closure_value(tokens: &[SyntaxToken], j: &mut usize, end: usize) -> Option<String> {
-    let mut text = String::new();
-
-    // 1. Opening `|`
-    if *j >= end || tokens[*j].kind() != T![|] {
+/// Consume a balanced `{ … }` span from the cursor and return the
+/// `(start, end_exclusive)` token indices that cover it. Cursor ends up just
+/// past the closing brace on success. Returns `None` if the next token isn't
+/// `{` or if the braces are unbalanced.
+fn consume_balanced_braces(c: &mut Cursor) -> Option<(usize, usize)> {
+    if c.peek_kind() != Some(T!['{']) {
         return None;
     }
-    push_and_advance(tokens, j, &mut text);
-
-    // 2-3. Skip arg tokens until the matching closing `|`. Real closure args
-    // never contain `|` (only commas/types/patterns), so this is unambiguous.
-    while *j < end && tokens[*j].kind() != T![|] {
-        push_and_advance(tokens, j, &mut text);
-    }
-    if *j >= end {
-        return None; // unterminated args
-    }
-    push_and_advance(tokens, j, &mut text); // closing `|`
-
-    // 4. Block body must open with `{`.
-    if *j >= end || tokens[*j].kind() != T!['{'] {
-        return None;
-    }
-
-    // 5-6. Walk a balanced `{...}` span. Tokens inside don't affect closure
-    // boundaries — `|`s are bitwise-or or match alternation, both fine.
+    let start = c.pos;
     let mut depth: i32 = 0;
-    while *j < end {
-        let kind = tokens[*j].kind();
-        if kind == T!['{'] {
-            depth += 1;
-        } else if kind == T!['}'] {
-            depth -= 1;
-            push_and_advance(tokens, j, &mut text);
-            if depth == 0 {
-                return Some(text);
+    while !c.at_end() {
+        match c.peek_kind() {
+            Some(T!['{']) => depth += 1,
+            Some(T!['}']) => {
+                depth -= 1;
+                c.advance();
+                if depth == 0 {
+                    return Some((start, c.pos));
+                }
+                continue;
             }
-            continue;
+            _ => {}
         }
-        push_and_advance(tokens, j, &mut text);
+        c.advance();
     }
-    // EOF before balanced close.
     None
+}
+
+/// Lifecycle blocks extracted from a single state's body.
+#[derive(Default)]
+struct StateHooks {
+    entry: Option<String>,
+    process: Option<String>,
+    exit: Option<String>,
+}
+
+/// Structurally parse a state body `{ entry: …, process: …, exit: … }` by
+/// wrapping its tokens in a synthetic struct-literal expression, handing it
+/// to ra_ap_syntax, and walking the resulting `RecordExpr`. Each closure
+/// hook is returned as its full source text (`|args| { body }`).
+///
+/// Replaces the old `j`-index lifecycle loop. The wrap is `let _ = _S { … };`
+/// inside a dummy `fn _f() { … }` so the macro body's struct-literal-shaped
+/// syntax becomes a real `ast::RecordExpr` we can walk.
+fn parse_state_body_hooks(tokens: &[SyntaxToken]) -> StateHooks {
+    let mut hooks = StateHooks::default();
+    let body_text = reconstruct_tokens(tokens);
+    let wrapped = format!("fn _f() {{ let _ = _S {}; }}", body_text);
+    let parse = SourceFile::parse(&wrapped, Edition::Edition2021);
+    let Some(record) = parse
+        .tree()
+        .syntax()
+        .descendants()
+        .find_map(ast::RecordExpr::cast)
+    else {
+        return hooks;
+    };
+    let Some(field_list) = record.record_expr_field_list() else {
+        return hooks;
+    };
+    for field in field_list.fields() {
+        let Some(name_ref) = field.field_name() else { continue };
+        let Some(expr) = field.expr() else { continue };
+        let value_text = expr.syntax().text().to_string();
+        match name_ref.text().as_str() {
+            "entry" => hooks.entry = Some(value_text),
+            "process" => hooks.process = Some(value_text),
+            "exit" => hooks.exit = Some(value_text),
+            _ => {}
+        }
+    }
+    hooks
+}
+
+/// Structurally parse a state's `{ field: type, … }` field list by wrapping
+/// its tokens in a synthetic struct declaration and walking the resulting
+/// `RecordFieldList`. Field types pass through `canonical_type_text` so
+/// downstream alias and registry lookups see the same canonical form.
+fn parse_state_fields(tokens: &[SyntaxToken]) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let fields_text = reconstruct_tokens(tokens);
+    let wrapped = format!("struct _S {};", fields_text);
+    let parse = SourceFile::parse(&wrapped, Edition::Edition2021);
+    let Some(s) = parse
+        .tree()
+        .syntax()
+        .descendants()
+        .find_map(ast::Struct::cast)
+    else {
+        return out;
+    };
+    let Some(ast::FieldList::RecordFieldList(list)) = s.field_list() else {
+        return out;
+    };
+    for field in list.fields() {
+        let Some(name) = field.name() else { continue };
+        let Some(ty) = field.ty() else { continue };
+        out.push((name.text().to_string(), canonical_type_text(&ty)));
+    }
+    out
 }
 
 pub fn parse_macro_body(token_tree: ast::TokenTree) -> Result<FsmDefinition, ParseError> {
@@ -885,101 +931,39 @@ pub fn parse_macro_body(token_tree: ast::TokenTree) -> Result<FsmDefinition, Par
                     let state_name = c.peek_text().unwrap_or("").to_string();
                     c.advance();
 
-                    let mut fields = Vec::new();
-                    if c.eat(T!['{']) {
-                        while !c.at_end() && c.peek_kind() != Some(T!['}']) {
-                            let f_name = c.peek_text().unwrap_or("").to_string();
-                            c.advance();
-                            if c.eat(T![:]) {
-                                let mut f_type = String::new();
-                                while !c.at_end()
-                                    && c.peek_kind() != Some(T![,])
-                                    && c.peek_kind() != Some(T!['}'])
-                                {
-                                    f_type.push_str(c.peek_text().unwrap_or(""));
-                                    c.advance();
-                                }
-                                fields.push((f_name, f_type));
-                            }
-                            c.eat(T![,]);
-                        }
-                        c.eat(T!['}']);
-                    }
+                    // Optional `{ field: type, … }` field list — structural
+                    // parse via a synthetic `struct _S { … };` wrapper.
+                    let fields = if let Some((fs, fe)) = consume_balanced_braces(&mut c) {
+                        parse_state_fields(&tokens[fs..fe])
+                    } else {
+                        Vec::new()
+                    };
 
                     c.eat_fat_arrow();
 
-                    if c.peek_kind() == Some(T!['{']) {
-                        // Capture the state body as a balanced `{...}` slice, then
-                        // hand it off to the lifecycle-block parser below.
-                        let start = c.pos;
-                        let mut depth = 0;
-                        while !c.at_end() {
-                            match c.peek_kind() {
-                                Some(T!['{']) => depth += 1,
-                                Some(T!['}']) => {
-                                    depth -= 1;
-                                    if depth == 0 {
-                                        break;
-                                    }
-                                }
-                                _ => {}
-                            }
-                            c.advance();
+                    // State body `{ entry: …, process: …, exit: … }` —
+                    // structural parse via a synthetic `let _ = _S { … };`
+                    // wrapper.
+                    if let Some((bs, be)) = consume_balanced_braces(&mut c) {
+                        let hooks = parse_state_body_hooks(&tokens[bs..be]);
+                        if let Some(process_block) = hooks.process {
+                            states.push(StateDefinition {
+                                name: state_name,
+                                fields,
+                                entry_block: hooks.entry,
+                                process_block,
+                                exit_block: hooks.exit,
+                            });
+                        } else if first_state_error.is_none() {
+                            first_state_error =
+                                Some(ParseError::StateMissingProcessBlock(state_name));
                         }
-                        let end = c.pos;
-                        c.advance(); // past the closing `}`
-
-                        let mut entry_block = None;
-                        let mut process_block = None;
-                        let mut exit_block = None;
-
-                        let mut j = start + 1;
-                        while j < end {
-                            let key = tokens[j].text();
-                            if key == "entry" || key == "process" || key == "exit" {
-                                let current_key = key.to_string();
-                                j += 1;
-                                if j < end && tokens[j].kind() == T![:] {
-                                    j += 1;
-                                    if let Some(block_text) =
-                                        parse_closure_value(&tokens, &mut j, end)
-                                    {
-                                        match current_key.as_str() {
-                                            "entry" => entry_block = Some(block_text),
-                                            "process" => process_block = Some(block_text),
-                                            "exit" => exit_block = Some(block_text),
-                                            _ => {}
-                                        }
-                                    }
-                                    if j < end && tokens[j].kind() == T![,] {
-                                        j += 1;
-                                    }
-                                    continue;
-                                }
-                                j += 1;
-                            }
-                            j += 1;
-                        }
-
-                        if let Some(pb) = process_block {
-                                states.push(StateDefinition {
-                                    name: state_name,
-                                    fields,
-                                    entry_block,
-                                    process_block: pb,
-                                    exit_block,
-                                });
-                            } else if first_state_error.is_none() {
-                                first_state_error = Some(
-                                    ParseError::StateMissingProcessBlock(state_name),
-                                );
-                            }
-                        }
-
-                        c.eat(T![,]);
                     }
-                    c.eat(T!['}']);
+
+                    c.eat(T![,]);
                 }
+                c.eat(T!['}']);
+            }
         } else {
             // Unknown token at the top level — eat it (covers stray `,`,
             // unfamiliar keys we don't know about yet, etc.).
