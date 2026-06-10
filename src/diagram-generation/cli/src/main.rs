@@ -3,7 +3,8 @@ use std::fs;
 use std::collections::{HashMap, HashSet};
 use clap::Parser;
 use serde::Deserialize;
-use syn::{visit::{self, Visit}, Macro};
+use syn::{visit::{self, Visit}, Macro, ItemStruct, Fields};
+use quote::quote;
 use walkdir::WalkDir;
 use typed_fsm_diagram_core::{FsmDefinition, generate_mermaid_simple, generate_mermaid_hierarchical, SubFsmVisitor};
 
@@ -12,7 +13,7 @@ use typed_fsm_diagram_core::{FsmDefinition, generate_mermaid_simple, generate_me
 struct Args {
     /// Source directory or file to scan for state_machine! macros
     #[arg(short, long)]
-    src: Option<String>,
+    scan: Option<String>,
 
     /// Path to the configuration file
     #[arg(short, long)]
@@ -71,22 +72,40 @@ fn default_output_dir() -> String { "target/docs/diagrams".to_string() }
 fn default_mode() -> DiagramMode { DiagramMode::Hierarchical }
 fn default_breakdown() -> BreakdownMode { BreakdownMode::Flat }
 
-struct FsmFinder {
-    found: Vec<FsmDefinition>,
+struct WorkspaceFinder {
+    found_fsms: Vec<FsmDefinition>,
+    found_structs: HashMap<String, HashMap<String, String>>,
 }
 
-impl<'ast> Visit<'ast> for FsmFinder {
+impl<'ast> Visit<'ast> for WorkspaceFinder {
     fn visit_macro(&mut self, i: &'ast Macro) {
         if i.path.is_ident("state_machine") {
             if let Ok(fsm) = i.parse_body::<FsmDefinition>() {
-                self.found.push(fsm);
+                self.found_fsms.push(fsm);
             }
         }
         visit::visit_macro(self, i);
     }
+
+    fn visit_item_struct(&mut self, i: &'ast ItemStruct) {
+        let struct_name = i.ident.to_string();
+        let mut fields = HashMap::new();
+        if let Fields::Named(ref named) = i.fields {
+            for field in &named.named {
+                if let Some(ref ident) = field.ident {
+                    let field_name = ident.to_string();
+                    let ty = &field.ty;
+                    let type_name = quote!(#ty).to_string().replace(" ", "");
+                    fields.insert(field_name, type_name);
+                }
+            }
+        }
+        self.found_structs.insert(struct_name, fields);
+        visit::visit_item_struct(self, i);
+    }
 }
 
-fn process_file(path: &Path, finder: &mut FsmFinder) -> anyhow::Result<()> {
+fn process_file(path: &Path, finder: &mut WorkspaceFinder) -> anyhow::Result<()> {
     let content = fs::read_to_string(path)?;
     if let Ok(syntax) = syn::parse_file(&content) {
         finder.visit_file(&syntax);
@@ -106,15 +125,15 @@ fn main() -> anyhow::Result<()> {
     };
     
     let output_dir = args.output.unwrap_or(config.mermaid.output_dir.clone());
-    let src_input = args.src.unwrap_or(config.mermaid.scan_dir.clone());
+    let src_input = args.scan.unwrap_or(config.mermaid.scan_dir.clone());
     
     let src_path = Path::new(&src_input);
     if !src_path.exists() {
         anyhow::bail!("Error: Source path '{}' does not exist.", src_input);
     }
 
-    println!("Scanning {} for state_machine! macros...", src_input);
-    let mut finder = FsmFinder { found: vec![] };
+    println!("Scanning {} for state_machine! macros and context structs...", src_input);
+    let mut finder = WorkspaceFinder { found_fsms: vec![], found_structs: HashMap::new() };
 
     if src_path.is_file() {
         process_file(src_path, &mut finder)?;
@@ -126,7 +145,7 @@ fn main() -> anyhow::Result<()> {
         }
     }
     
-    if finder.found.is_empty() {
+    if finder.found_fsms.is_empty() {
         println!("No state_machine! macros found in the specified source.");
         return Ok(());
     }
@@ -138,15 +157,17 @@ fn main() -> anyhow::Result<()> {
     }
     fs::create_dir_all(&output_dir)?;
 
-    println!("Found {} FSM definitions.", finder.found.len());
-    let fsm_map: HashMap<String, &FsmDefinition> = finder.found.iter().map(|f| (f.name.to_string(), f)).collect();
+    println!("Found {} FSM definitions and {} struct definitions.", finder.found_fsms.len(), finder.found_structs.len());
+    
+    let fsm_map: HashMap<String, &FsmDefinition> = finder.found_fsms.iter().map(|f| (f.name.to_string(), f)).collect();
 
     // Identify Root FSMs (those not referenced by any other FSM)
     let mut all_children = HashSet::new();
-    for fsm in &finder.found {
+    for fsm in &finder.found_fsms {
         let mut visitor = SubFsmVisitor {
             fsm_name: fsm.name.to_string(),
             discovered: HashSet::new(),
+            context_fields: HashSet::new(),
         };
         for state in &fsm.states {
             if let Some(entry) = &state.entry_block { visitor.visit_expr(entry); }
@@ -154,18 +175,31 @@ fn main() -> anyhow::Result<()> {
             if let Some(exit) = &state.exit_block { visitor.visit_expr(exit); }
             for (_, f_type) in &state.fields { visitor.visit_type(f_type); }
         }
-        for child in visitor.discovered {
-            all_children.insert(child);
+
+        // 1. Explicit discovery
+        for child in &visitor.discovered {
+            all_children.insert(child.clone());
+        }
+
+        // 2. Contextual discovery
+        if let Some(ctx_type) = &fsm.context_type {
+            let ctx_name = quote!(#ctx_type).to_string().replace(" ", "");
+            if let Some(fields) = finder.found_structs.get(&ctx_name) {
+                for field_name in visitor.context_fields {
+                    if let Some(type_name) = fields.get(&field_name) {
+                        let base_type = type_name.split("::").last().unwrap_or(type_name);
+                        if fsm_map.contains_key(base_type) {
+                            all_children.insert(base_type.to_string());
+                        }
+                    }
+                }
+            }
         }
     }
 
-    let root_fsms: Vec<&FsmDefinition> = if src_path.is_file() {
-        finder.found.iter().collect()
-    } else {
-        finder.found.iter()
-            .filter(|f| !all_children.contains(&f.name.to_string()))
-            .collect()
-    };
+    let root_fsms: Vec<&FsmDefinition> = finder.found_fsms.iter()
+        .filter(|f| !all_children.contains(&f.name.to_string()))
+        .collect();
 
     println!("Identified {} root FSM(s) for organization.", root_fsms.len());
 
@@ -176,7 +210,7 @@ fn main() -> anyhow::Result<()> {
         
         let content = match config.mermaid.mode {
             DiagramMode::Simple => generate_mermaid_simple(fsm),
-            DiagramMode::Hierarchical => generate_mermaid_hierarchical(fsm, &fsm_map),
+            DiagramMode::Hierarchical => generate_mermaid_hierarchical(fsm, &fsm_map, &finder.found_structs),
         };
         
         let path = fsm_output_dir.join(format!("{}.mermaid", name));
@@ -184,11 +218,11 @@ fn main() -> anyhow::Result<()> {
         println!("Generated root: {}", path.display());
 
         match config.mermaid.breakdown {
-            BreakdownMode::Flat => save_breakdown(fsm, &fsm_map, &fsm_output_dir, "breakdown", false)?,
-            BreakdownMode::Nested => save_breakdown(fsm, &fsm_map, &fsm_output_dir, "breakdown", true)?,
+            BreakdownMode::Flat => save_breakdown(fsm, &fsm_map, &finder.found_structs, &fsm_output_dir, "breakdown", false)?,
+            BreakdownMode::Nested => save_breakdown(fsm, &fsm_map, &finder.found_structs, &fsm_output_dir, "breakdown", true)?,
             BreakdownMode::Both => {
-                save_breakdown(fsm, &fsm_map, &fsm_output_dir, "breakdown_flat", false)?;
-                save_breakdown(fsm, &fsm_map, &fsm_output_dir, "breakdown_nested", true)?;
+                save_breakdown(fsm, &fsm_map, &finder.found_structs, &fsm_output_dir, "breakdown_flat", false)?;
+                save_breakdown(fsm, &fsm_map, &finder.found_structs, &fsm_output_dir, "breakdown_nested", true)?;
             },
             BreakdownMode::None => {},
         }
@@ -200,12 +234,13 @@ fn main() -> anyhow::Result<()> {
 fn save_breakdown(
     fsm: &FsmDefinition, 
     all_fsms: &HashMap<String, &FsmDefinition>, 
+    struct_map: &HashMap<String, HashMap<String, String>>,
     fsm_output_dir: &Path, 
     sub_dir: &str, 
     nested: bool
 ) -> anyhow::Result<()> {
     let mut discovered = HashSet::new();
-    collect_all_subfsms(fsm, all_fsms, &mut discovered);
+    collect_all_subfsms(fsm, all_fsms, struct_map, &mut discovered);
 
     if discovered.is_empty() {
         return Ok(());
@@ -217,7 +252,7 @@ fn save_breakdown(
     for sub_name in discovered {
         if let Some(sub_fsm) = all_fsms.get(&sub_name) {
             let content = if nested {
-                generate_mermaid_hierarchical(sub_fsm, all_fsms)
+                generate_mermaid_hierarchical(sub_fsm, all_fsms, struct_map)
             } else {
                 generate_mermaid_simple(sub_fsm)
             };
@@ -231,11 +266,13 @@ fn save_breakdown(
 fn collect_all_subfsms(
     fsm: &FsmDefinition, 
     all_fsms: &HashMap<String, &FsmDefinition>, 
+    struct_map: &HashMap<String, HashMap<String, String>>,
     discovered: &mut HashSet<String>
 ) {
     let mut visitor = SubFsmVisitor {
         fsm_name: fsm.name.to_string(),
         discovered: HashSet::new(),
+        context_fields: HashSet::new(),
     };
     for state in &fsm.states {
         if let Some(entry) = &state.entry_block { visitor.visit_expr(entry); }
@@ -244,11 +281,26 @@ fn collect_all_subfsms(
         for (_, f_type) in &state.fields { visitor.visit_type(f_type); }
     }
 
-    for sub_name in visitor.discovered {
+    let mut all_found = visitor.discovered;
+    if let Some(ctx_type) = &fsm.context_type {
+        let ctx_name = quote!(#ctx_type).to_string().replace(" ", "");
+        if let Some(fields) = struct_map.get(&ctx_name) {
+            for field_name in visitor.context_fields {
+                if let Some(type_name) = fields.get(&field_name) {
+                    let base_type = type_name.split("::").last().unwrap_or(type_name);
+                    if all_fsms.contains_key(base_type) {
+                        all_found.insert(base_type.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    for sub_name in all_found {
         if all_fsms.contains_key(&sub_name) && !discovered.contains(&sub_name) {
             discovered.insert(sub_name.clone());
             if let Some(sub_fsm) = all_fsms.get(&sub_name) {
-                collect_all_subfsms(sub_fsm, all_fsms, discovered);
+                collect_all_subfsms(sub_fsm, all_fsms, struct_map, discovered);
             }
         }
     }

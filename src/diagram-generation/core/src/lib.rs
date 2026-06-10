@@ -5,6 +5,7 @@ use mermaid_builder::prelude::*;
 
 pub struct FsmDefinition {
     pub name: Ident,
+    pub context_type: Option<Type>,
     pub states: Vec<StateDefinition>,
 }
 
@@ -18,110 +19,111 @@ pub struct StateDefinition {
 
 impl Parse for FsmDefinition {
     fn parse(input: ParseStream) -> syn::Result<Self> {
-        // Skip till Name:
+        let mut name = None;
+        let mut context_type = None;
+        let mut states = Vec::new();
+
         while !input.is_empty() {
             if input.peek(Ident) {
                 let fork = input.fork();
                 let id: Ident = fork.parse()?;
                 if id == "Name" {
-                    break;
-                }
-            }
-            input.parse::<proc_macro2::TokenTree>()?;
-        }
-        let _: Ident = input.parse()?; // "Name"
-        input.parse::<Token![:]>()?;
-        let name: Ident = input.parse()?;
-
-        // Skip till States:
-        while !input.is_empty() {
-            if input.peek(Ident) {
-                let fork = input.fork();
-                let id: Ident = fork.parse()?;
-                if id == "States" {
-                    break;
-                }
-            }
-            input.parse::<proc_macro2::TokenTree>()?;
-        }
-
-        let _: Ident = input.parse()?; // "States"
-        input.parse::<Token![:]>()?;
-        
-        let content;
-        braced!(content in input);
-        
-        let mut states = Vec::new();
-        while !content.is_empty() {
-            let state_name: Ident = content.parse()?;
-            
-            let mut fields = Vec::new();
-            if content.peek(syn::token::Brace) {
-                let field_content;
-                braced!(field_content in content);
-                while !field_content.is_empty() {
-                    let f_name: Ident = field_content.parse()?;
-                    field_content.parse::<Token![:]>()?;
-                    let f_type: Type = field_content.parse()?;
-                    fields.push((f_name, f_type));
-                    if field_content.peek(Token![,]) {
-                        field_content.parse::<Token![,]>()?;
+                    input.parse::<Ident>()?; // "Name"
+                    input.parse::<Token![:]>()?;
+                    name = Some(input.parse::<Ident>()?);
+                    if input.peek(Token![,]) { input.parse::<Token![,]>()?; }
+                } else if id == "Context" {
+                    input.parse::<Ident>()?; // "Context"
+                    input.parse::<Token![:]>()?;
+                    context_type = Some(input.parse::<Type>()?);
+                    if input.peek(Token![,]) { input.parse::<Token![,]>()?; }
+                } else if id == "States" {
+                    input.parse::<Ident>()?; // "States"
+                    input.parse::<Token![:]>()?;
+                    
+                    let content;
+                    braced!(content in input);
+                    
+                    while !content.is_empty() {
+                        let state_name: Ident = content.parse()?;
+                        
+                        let mut fields = Vec::new();
+                        if content.peek(syn::token::Brace) {
+                            let field_content;
+                            braced!(field_content in content);
+                            while !field_content.is_empty() {
+                                let f_name: Ident = field_content.parse()?;
+                                field_content.parse::<Token![:]>()?;
+                                let f_type: Type = field_content.parse()?;
+                                fields.push((f_name, f_type));
+                                if field_content.peek(Token![,]) {
+                                    field_content.parse::<Token![,]>()?;
+                                }
+                            }
+                        }
+                        
+                        content.parse::<Token![=>]>()?;
+                        
+                        let state_content;
+                        braced!(state_content in content);
+                        
+                        let mut entry_block = None;
+                        let mut process_block = None;
+                        let mut exit_block = None;
+                        
+                        while !state_content.is_empty() {
+                            let fork = state_content.fork();
+                            if let Ok(key) = fork.parse::<Ident>() {
+                                if key == "process" {
+                                    state_content.parse::<Ident>()?;
+                                    state_content.parse::<Token![:]>()?;
+                                    process_block = Some(state_content.parse::<Expr>()?);
+                                } else if key == "entry" {
+                                    state_content.parse::<Ident>()?;
+                                    state_content.parse::<Token![:]>()?;
+                                    entry_block = Some(state_content.parse::<Expr>()?);
+                                } else if key == "exit" {
+                                    state_content.parse::<Ident>()?;
+                                    state_content.parse::<Token![:]>()?;
+                                    exit_block = Some(state_content.parse::<Expr>()?);
+                                } else {
+                                    state_content.parse::<proc_macro2::TokenTree>()?;
+                                }
+                            } else {
+                                state_content.parse::<proc_macro2::TokenTree>()?;
+                            }
+                            
+                            if state_content.peek(Token![,]) {
+                                state_content.parse::<Token![,]>()?;
+                            }
+                        }
+                        
+                        if let Some(pb) = process_block {
+                            states.push(StateDefinition {
+                                name: state_name,
+                                fields,
+                                entry_block,
+                                process_block: pb,
+                                exit_block,
+                            });
+                        }
+                        
+                        if content.peek(Token![,]) {
+                            content.parse::<Token![,]>()?;
+                        }
                     }
-                }
-            }
-            
-            content.parse::<Token![=>]>()?;
-            
-            let state_content;
-            braced!(state_content in content);
-            
-            let mut entry_block = None;
-            let mut process_block = None;
-            let mut exit_block = None;
-            
-            while !state_content.is_empty() {
-                let fork = state_content.fork();
-                if let Ok(key) = fork.parse::<Ident>() {
-                    if key == "process" {
-                        state_content.parse::<Ident>()?;
-                        state_content.parse::<Token![:]>()?;
-                        process_block = Some(state_content.parse::<Expr>()?);
-                    } else if key == "entry" {
-                        state_content.parse::<Ident>()?;
-                        state_content.parse::<Token![:]>()?;
-                        entry_block = Some(state_content.parse::<Expr>()?);
-                    } else if key == "exit" {
-                        state_content.parse::<Ident>()?;
-                        state_content.parse::<Token![:]>()?;
-                        exit_block = Some(state_content.parse::<Expr>()?);
-                    } else {
-                        state_content.parse::<proc_macro2::TokenTree>()?;
-                    }
+                    if input.peek(Token![,]) { input.parse::<Token![,]>()?; }
                 } else {
-                    state_content.parse::<proc_macro2::TokenTree>()?;
+                    input.parse::<proc_macro2::TokenTree>()?;
                 }
-                
-                if state_content.peek(Token![,]) {
-                    state_content.parse::<Token![,]>()?;
-                }
-            }
-            
-            if let Some(pb) = process_block {
-                states.push(StateDefinition {
-                    name: state_name,
-                    fields,
-                    entry_block,
-                    process_block: pb,
-                    exit_block,
-                });
-            }
-            
-            if content.peek(Token![,]) {
-                content.parse::<Token![,]>()?;
+            } else {
+                input.parse::<proc_macro2::TokenTree>()?;
             }
         }
 
-        Ok(FsmDefinition { name, states })
+        let name = name.ok_or_else(|| input.error("Missing 'Name' in state_machine!"))?;
+
+        Ok(FsmDefinition { name, context_type, states })
     }
 }
 
@@ -244,6 +246,7 @@ pub fn clean_tokens(s: String) -> String {
 pub struct SubFsmVisitor {
     pub fsm_name: String,
     pub discovered: HashSet<String>,
+    pub context_fields: HashSet<String>,
 }
 
 impl<'ast> Visit<'ast> for SubFsmVisitor {
@@ -275,6 +278,13 @@ impl<'ast> Visit<'ast> for SubFsmVisitor {
         }
         visit::visit_path(self, path);
     }
+
+    fn visit_expr_field(&mut self, i: &'ast syn::ExprField) {
+        if let syn::Member::Named(ref ident) = i.member {
+            self.context_fields.insert(ident.to_string());
+        }
+        visit::visit_expr_field(self, i);
+    }
 }
 
 /// Generates a Mermaid.js string for a single FSM (no nesting).
@@ -300,11 +310,12 @@ pub fn generate_mermaid_simple(fsm: &FsmDefinition) -> String {
 
     for trans in all_edges {
         if let (Some(src), Some(dst)) = (nodes.get(&trans.source), nodes.get(&trans.target)) {
+            let label = if trans.label.is_empty() { "*" } else { &trans.label };
             builder.edge(
                 StateEdgeBuilder::default()
                     .source(src.clone()).unwrap()
                     .destination(dst.clone()).unwrap()
-                    .label(&trans.label).unwrap()
+                    .label(label).unwrap()
             ).unwrap();
         }
     }
@@ -316,18 +327,28 @@ pub fn generate_mermaid_simple(fsm: &FsmDefinition) -> String {
 pub fn generate_mermaid_hierarchical(
     fsm: &FsmDefinition, 
     all_fsms: &HashMap<String, &FsmDefinition>,
+    context_struct_map: &HashMap<String, HashMap<String, String>>,
 ) -> String {
-    let builder = populate_builder_hierarchical(fsm, all_fsms);
+    let builder = populate_builder_hierarchical(fsm, all_fsms, context_struct_map);
     StateDiagram::from(builder).to_string()
 }
 
 fn populate_builder_hierarchical(
     fsm: &FsmDefinition,
     all_fsms: &HashMap<String, &FsmDefinition>,
+    context_struct_map: &HashMap<String, HashMap<String, String>>,
 ) -> StateDiagramBuilder {
     let mut builder = StateDiagramBuilder::default();
     let mut nodes = HashMap::new();
     let mut all_edges = Vec::new();
+
+    // Get the context fields for this FSM
+    let context_fields = if let Some(ctx_type) = &fsm.context_type {
+        let ctx_name = quote!(#ctx_type).to_string().replace(" ", "");
+        context_struct_map.get(&ctx_name)
+    } else {
+        None
+    };
 
     for state in &fsm.states {
         let state_name = state.name.to_string();
@@ -338,15 +359,31 @@ fn populate_builder_hierarchical(
         let mut subfsm_visitor = SubFsmVisitor {
             fsm_name: fsm.name.to_string(),
             discovered: HashSet::new(),
+            context_fields: HashSet::new(),
         };
         if let Some(entry) = &state.entry_block { subfsm_visitor.visit_expr(entry); }
         subfsm_visitor.visit_expr(&state.process_block);
         if let Some(exit) = &state.exit_block { subfsm_visitor.visit_expr(exit); }
         for (_, f_type) in &state.fields { subfsm_visitor.visit_type(f_type); }
 
-        for sub_name in subfsm_visitor.discovered {
+        // 1. Explicit discovery (types mentioned in state fields or directly)
+        let mut all_discovered = subfsm_visitor.discovered;
+
+        // 2. Contextual discovery (fields accessed in this state that are FSMs)
+        if let Some(fields) = context_fields {
+            for field_name in subfsm_visitor.context_fields {
+                if let Some(type_name) = fields.get(&field_name) {
+                    let base_type = type_name.split("::").last().unwrap_or(type_name);
+                    if all_fsms.contains_key(base_type) {
+                        all_discovered.insert(base_type.to_string());
+                    }
+                }
+            }
+        }
+
+        for sub_name in all_discovered {
             if let Some(sub_fsm) = all_fsms.get(&sub_name) {
-                let sub_builder = populate_builder_hierarchical(sub_fsm, all_fsms);
+                let sub_builder = populate_builder_hierarchical(sub_fsm, all_fsms, context_struct_map);
                 node_builder = node_builder.inner_diagram(StateDiagram::from(sub_builder)).unwrap();
             }
         }
@@ -364,11 +401,12 @@ fn populate_builder_hierarchical(
 
     for trans in all_edges {
         if let (Some(src), Some(dst)) = (nodes.get(&trans.source), nodes.get(&trans.target)) {
+            let label = if trans.label.is_empty() { "*" } else { &trans.label };
             builder.edge(
                 StateEdgeBuilder::default()
                     .source(src.clone()).unwrap()
                     .destination(dst.clone()).unwrap()
-                    .label(&trans.label).unwrap()
+                    .label(label).unwrap()
             ).unwrap();
         }
     }

@@ -37,6 +37,7 @@ pub fn generate_diagram(input: TokenStream) -> TokenStream {
         let mut subfsm_visitor = SubFsmVisitor {
             fsm_name: fsm_name_str.clone(),
             discovered: HashSet::new(),
+            context_fields: HashSet::new(),
         };
         
         if let Some(entry) = &state.entry_block {
