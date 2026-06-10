@@ -788,5 +788,8 @@ mod tests {
 
         let input = "Apply{a,b,}".to_string();
         assert_eq!(clean_tokens(input), "Apply<br/>{ a, b }");
+
+        let input = "HeaderScheduleEvent :: Apply { resweep , force_occupancy_broadcast , occupancy_changed , }".to_string();
+        assert_eq!(clean_tokens(input), "HeaderScheduleEvent::Apply<br/>{ resweep, force_occupancy_broadcast, occupancy_changed }");
     }
 }
