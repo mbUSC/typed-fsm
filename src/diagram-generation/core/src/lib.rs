@@ -558,6 +558,71 @@ impl SubFsmExtractor {
     }
 }
 
+/// Tiny token-by-token cursor over a flat slice. Encapsulates the manual
+/// `i += 1`, bounds-check and `tokens[i].kind()` patterns that infected
+/// `parse_macro_body` — making the surrounding control flow much easier to
+/// audit for off-by-ones and missed advances.
+struct Cursor<'a> {
+    tokens: &'a [SyntaxToken],
+    pos: usize,
+}
+
+impl<'a> Cursor<'a> {
+    fn new(tokens: &'a [SyntaxToken]) -> Self {
+        Self { tokens, pos: 0 }
+    }
+
+    fn at_end(&self) -> bool {
+        self.pos >= self.tokens.len()
+    }
+
+    fn peek(&self) -> Option<&'a SyntaxToken> {
+        self.tokens.get(self.pos)
+    }
+
+    fn peek_kind(&self) -> Option<SyntaxKind> {
+        self.peek().map(|t| t.kind())
+    }
+
+    fn peek_text(&self) -> Option<&'a str> {
+        self.peek().map(|t| t.text())
+    }
+
+    fn peek_kind_at(&self, offset: usize) -> Option<SyntaxKind> {
+        self.tokens.get(self.pos + offset).map(|t| t.kind())
+    }
+
+    fn advance(&mut self) {
+        if self.pos < self.tokens.len() {
+            self.pos += 1;
+        }
+    }
+
+    /// Consume the next token if it has `kind`; return whether we did.
+    fn eat(&mut self, kind: SyntaxKind) -> bool {
+        if self.peek_kind() == Some(kind) {
+            self.advance();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Consume `=>`, tolerating both the single-punct form and the `=` `>`
+    /// pair some token streams produce.
+    fn eat_fat_arrow(&mut self) -> bool {
+        if self.eat(T![=>]) {
+            return true;
+        }
+        if self.peek_kind() == Some(T![=]) && self.peek_kind_at(1) == Some(T![>]) {
+            self.advance();
+            self.advance();
+            return true;
+        }
+        false
+    }
+}
+
 pub fn parse_macro_body(token_tree: ast::TokenTree) -> Result<FsmDefinition, ParseError> {
     let mut name: Option<String> = None;
     let mut context_type = None;
@@ -571,152 +636,145 @@ pub fn parse_macro_body(token_tree: ast::TokenTree) -> Result<FsmDefinition, Par
         .filter(|t| t.kind() != SyntaxKind::WHITESPACE && t.kind() != SyntaxKind::COMMENT)
         .collect();
 
-    let mut i = 0;
-    if i < tokens.len() && tokens[i].kind() == T!['{'] {
-        i += 1;
-    }
+    let mut c = Cursor::new(&tokens);
+    c.eat(T!['{']);
 
-    while i < tokens.len() && tokens[i].kind() != T!['}'] {
-        let token = &tokens[i];
-        let text = token.text();
+    while !c.at_end() && c.peek_kind() != Some(T!['}']) {
+        let Some(text) = c.peek_text() else { break };
 
         if text == "Name" {
-            i += 1;
-            if i < tokens.len() && tokens[i].kind() == T![:] {
-                i += 1;
-                if i < tokens.len() {
-                    name = Some(tokens[i].text().to_string());
-                    i += 1;
+            c.advance();
+            if c.eat(T![:]) {
+                if let Some(tok) = c.peek() {
+                    name = Some(tok.text().to_string());
+                    c.advance();
                 }
             }
         } else if text == "Context" {
-            i += 1;
-            if i < tokens.len() && tokens[i].kind() == T![:] {
-                i += 1;
+            c.advance();
+            if c.eat(T![:]) {
                 let mut ty = String::new();
-                while i < tokens.len()
-                    && tokens[i].kind() != T![,]
-                    && tokens[i].text() != "Event"
-                    && tokens[i].text() != "States"
+                while !c.at_end()
+                    && c.peek_kind() != Some(T![,])
+                    && c.peek_text() != Some("Event")
+                    && c.peek_text() != Some("States")
                 {
-                    ty.push_str(tokens[i].text());
-                    i += 1;
+                    ty.push_str(c.peek_text().unwrap_or(""));
+                    c.advance();
                 }
                 context_type = Some(ty);
             }
         } else if text == "States" {
-            i += 1;
-            if i < tokens.len() && tokens[i].kind() == T![:] {
-                i += 1;
-                if i < tokens.len() && tokens[i].kind() == T!['{'] {
-                    i += 1;
-                    while i < tokens.len() && tokens[i].kind() != T!['}'] {
-                        let state_name = tokens[i].text().to_string();
-                        i += 1;
+            c.advance();
+            if c.eat(T![:]) && c.eat(T!['{']) {
+                while !c.at_end() && c.peek_kind() != Some(T!['}']) {
+                    let state_name = c.peek_text().unwrap_or("").to_string();
+                    c.advance();
 
-                        let mut fields = Vec::new();
-                        if i < tokens.len() && tokens[i].kind() == T!['{'] {
-                            i += 1;
-                            while i < tokens.len() && tokens[i].kind() != T!['}'] {
-                                let f_name = tokens[i].text().to_string();
-                                i += 1;
-                                if i < tokens.len() && tokens[i].kind() == T![:] {
-                                    i += 1;
-                                    let mut f_type = String::new();
-                                    while i < tokens.len()
-                                        && tokens[i].kind() != T![,]
-                                        && tokens[i].kind() != T!['}']
-                                    {
-                                        f_type.push_str(tokens[i].text());
-                                        i += 1;
-                                    }
-                                    fields.push((f_name, f_type));
+                    let mut fields = Vec::new();
+                    if c.eat(T!['{']) {
+                        while !c.at_end() && c.peek_kind() != Some(T!['}']) {
+                            let f_name = c.peek_text().unwrap_or("").to_string();
+                            c.advance();
+                            if c.eat(T![:]) {
+                                let mut f_type = String::new();
+                                while !c.at_end()
+                                    && c.peek_kind() != Some(T![,])
+                                    && c.peek_kind() != Some(T!['}'])
+                                {
+                                    f_type.push_str(c.peek_text().unwrap_or(""));
+                                    c.advance();
                                 }
-                                if i < tokens.len() && tokens[i].kind() == T![,] {
-                                    i += 1;
-                                }
+                                fields.push((f_name, f_type));
                             }
-                            if i < tokens.len() && tokens[i].kind() == T!['}'] {
-                                i += 1;
-                            }
+                            c.eat(T![,]);
                         }
+                        c.eat(T!['}']);
+                    }
 
-                        if i < tokens.len() && tokens[i].kind() == T![=>] {
-                            i += 1;
-                        } else if i + 1 < tokens.len()
-                            && tokens[i].kind() == T![=]
-                            && tokens[i + 1].kind() == T![>]
-                        {
-                            i += 2;
-                        }
+                    c.eat_fat_arrow();
 
-                        if i < tokens.len() && tokens[i].kind() == T!['{'] {
-                            let start = i;
-                            let mut depth = 0;
-                            while i < tokens.len() {
-                                if tokens[i].kind() == T!['{'] {
-                                    depth += 1;
-                                } else if tokens[i].kind() == T!['}'] {
+                    if c.peek_kind() == Some(T!['{']) {
+                        // Capture the state body as a balanced `{...}` slice, then
+                        // hand it off to the lifecycle-block parser below.
+                        let start = c.pos;
+                        let mut depth = 0;
+                        while !c.at_end() {
+                            match c.peek_kind() {
+                                Some(T!['{']) => depth += 1,
+                                Some(T!['}']) => {
                                     depth -= 1;
                                     if depth == 0 {
                                         break;
                                     }
                                 }
-                                i += 1;
+                                _ => {}
                             }
-                            let end = i;
-                            if i < tokens.len() {
-                                i += 1;
-                            }
+                            c.advance();
+                        }
+                        let end = c.pos;
+                        c.advance(); // past the closing `}`
 
-                            let mut entry_block = None;
-                            let mut process_block = None;
-                            let mut exit_block = None;
+                        let mut entry_block = None;
+                        let mut process_block = None;
+                        let mut exit_block = None;
 
-                            let mut j = start + 1;
-                            while j < end {
-                                let key = tokens[j].text();
-                                if key == "entry" || key == "process" || key == "exit" {
-                                    let current_key = key.to_string();
+                        let mut j = start + 1;
+                        while j < end {
+                            let key = tokens[j].text();
+                            if key == "entry" || key == "process" || key == "exit" {
+                                let current_key = key.to_string();
+                                j += 1;
+                                if j < end && tokens[j].kind() == T![:] {
                                     j += 1;
-                                    if j < end && tokens[j].kind() == T![:] {
-                                        j += 1;
-                                        let mut block_text = String::new();
-                                        let mut inner_depth = 0;
-                                        let mut pipe_count = 0;
-                                        while j < end {
-                                            let tk = tokens[j].kind();
-                                            if tk == T!['{'] || tk == T!['('] || tk == T!['['] {
-                                                inner_depth += 1;
-                                            } else if tk == T!['}']
-                                                || tk == T![')']
-                                                || tk == T![']']
-                                            {
-                                                inner_depth -= 1;
-                                            } else if tk == T![|] {
-                                                pipe_count += 1;
-                                            } else if inner_depth == 0
-                                                && (pipe_count == 0 || pipe_count >= 2)
-                                            {
-                                                if tk == T![,] {
+                                    let mut block_text = String::new();
+                                    let mut inner_depth = 0;
+                                    // Pipe-counter rationale:
+                                    //   Lifecycle values look like `|args| body`.
+                                    //   At depth 0, the first `|` opens the
+                                    //   closure args, the second closes them.
+                                    //   While `pipe_count == 1` we're inside the
+                                    //   arg list — depth-0 commas there separate
+                                    //   args, not block siblings, so we must NOT
+                                    //   break on them. Once pipe_count reaches 2
+                                    //   (closed), depth-0 commas terminate the
+                                    //   block. Pairs of `|`s inside braces don't
+                                    //   matter — inner_depth > 0 short-circuits
+                                    //   the break check entirely.
+                                    let mut pipe_count = 0u32;
+                                    while j < end {
+                                        let tk = tokens[j].kind();
+                                        if tk == T!['{'] || tk == T!['('] || tk == T!['['] {
+                                            inner_depth += 1;
+                                        } else if tk == T!['}']
+                                            || tk == T![')']
+                                            || tk == T![']']
+                                        {
+                                            inner_depth -= 1;
+                                        } else if tk == T![|] {
+                                            pipe_count += 1;
+                                        } else if inner_depth == 0
+                                            && (pipe_count == 0 || pipe_count >= 2)
+                                        {
+                                            if tk == T![,] {
+                                                break;
+                                            }
+                                            if j + 1 < end && tokens[j + 1].kind() == T![:] {
+                                                let t = tokens[j].text();
+                                                if t == "process" || t == "exit" || t == "entry"
+                                                {
                                                     break;
                                                 }
-                                                if j + 1 < end && tokens[j + 1].kind() == T![:] {
-                                                    let t = tokens[j].text();
-                                                    if t == "process" || t == "exit" || t == "entry"
-                                                    {
-                                                        break;
-                                                    }
-                                                }
                                             }
-                                            block_text.push_str(tokens[j].text());
-                                            if j + 1 < end
-                                                && !tokens[j + 1].kind().is_punct()
-                                                && !tokens[j].kind().is_punct()
-                                            {
-                                                block_text.push(' ');
-                                            }
-                                            j += 1;
+                                        }
+                                        block_text.push_str(tokens[j].text());
+                                        if j + 1 < end
+                                            && !tokens[j + 1].kind().is_punct()
+                                            && !tokens[j].kind().is_punct()
+                                        {
+                                            block_text.push(' ');
+                                        }
+                                        j += 1;
                                         }
                                         match current_key.as_str() {
                                             "entry" => entry_block = Some(block_text),
@@ -748,19 +806,14 @@ pub fn parse_macro_body(token_tree: ast::TokenTree) -> Result<FsmDefinition, Par
                             }
                         }
 
-                        if i < tokens.len() && tokens[i].kind() == T![,] {
-                            i += 1;
-                        }
+                        c.eat(T![,]);
                     }
-                    if i < tokens.len() && tokens[i].kind() == T!['}'] {
-                        i += 1;
-                    }
+                    c.eat(T!['}']);
                 }
-            }
-        } else if tokens[i].kind() == T![,] {
-            i += 1;
         } else {
-            i += 1;
+            // Unknown token at the top level — eat it (covers stray `,`,
+            // unfamiliar keys we don't know about yet, etc.).
+            c.advance();
         }
     }
 
@@ -1306,6 +1359,80 @@ mod tests {
         let info = reg.lookup_unambiguous("unique").expect("should resolve");
         assert!(info.returns_transition);
         assert!(info.transition_targets.contains(&"Self::A".to_string()));
+    }
+
+    #[test]
+    fn parse_macro_body_handles_closure_with_pipe_in_body() {
+        // Match alternation `|` inside the closure body must NOT confuse the
+        // pipe-counter that delimits the closure's arg list. The body's `|`s
+        // are inside the `{...}` block, so `inner_depth > 0` short-circuits
+        // the break check entirely.
+        let src = r#"
+            state_machine! {
+                Name: AltFsm,
+                States: {
+                    Active => {
+                        process: |_ctx, evt| {
+                            match evt {
+                                Event::A | Event::B => Transition::To(Self::Done),
+                                _ => Transition::None,
+                            }
+                        }
+                    },
+                    Done => {
+                        process: |_ctx, _evt| { Transition::None }
+                    }
+                }
+            }
+        "#;
+        let fsm = parse_for_test(src).expect("alternation in pattern should parse");
+        assert_eq!(fsm.name, "AltFsm");
+        assert_eq!(fsm.states.len(), 2);
+    }
+
+    #[test]
+    fn parse_macro_body_handles_multiple_lifecycle_hooks_per_state() {
+        // entry, process, exit all present + a comma between them + another
+        // state after — the lifecycle parser must terminate each block at the
+        // right point.
+        let src = r#"
+            state_machine! {
+                Name: TriHook,
+                States: {
+                    Loaded => {
+                        entry: |_ctx| { let _x = 1; },
+                        process: |_ctx, _evt| { Transition::To(Self::Empty) },
+                        exit: |_ctx| { let _y = 2; }
+                    },
+                    Empty => {
+                        process: |_ctx, _evt| { Transition::None }
+                    }
+                }
+            }
+        "#;
+        let fsm = parse_for_test(src).expect("multi-hook state should parse");
+        let loaded = &fsm.states[0];
+        assert_eq!(loaded.name, "Loaded");
+        assert!(loaded.entry_block.is_some());
+        assert!(loaded.exit_block.is_some());
+        assert_eq!(fsm.states[1].name, "Empty");
+    }
+
+    #[test]
+    fn parse_macro_body_handles_state_with_no_fields() {
+        // No `{ field: ty }` between state name and `=>`.
+        let src = r#"
+            state_machine! {
+                Name: NoFields,
+                States: {
+                    Alpha => { process: |_c, _e| { Transition::None } },
+                    Beta => { process: |_c, _e| { Transition::None } }
+                }
+            }
+        "#;
+        let fsm = parse_for_test(src).expect("fieldless states should parse");
+        assert_eq!(fsm.states.len(), 2);
+        assert!(fsm.states.iter().all(|s| s.fields.is_empty()));
     }
 
     #[test]
