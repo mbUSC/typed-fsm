@@ -1675,6 +1675,74 @@ mod tests {
     }
 
     #[test]
+    fn destructured_pattern_with_nested_constructor_renders_correctly() {
+        // Specifically tests `Variant { field: Some(inner) }` and
+        // `Variant { field: None }` — destructures whose sub-patterns are
+        // themselves constructor expressions. End-to-end through the real
+        // pipeline. Also checks that the `:` inside the destructure becomes
+        // `#colon;` and that the brace gets a `<br/>` line break before it.
+        let src = r#"
+            state_machine! {
+                Name: MyFsm,
+                States: {
+                    Active => {
+                        process: |_ctx, evt| {
+                            match evt {
+                                MyEvent::Wrapped { inner: Some(value) } => Transition::To(Self::Done),
+                                MyEvent::Wrapped { inner: None } => Transition::To(Self::Failed),
+                                _ => Transition::None,
+                            }
+                        }
+                    },
+                    Done => { process: |_c, _e| { Transition::None } },
+                    Failed => { process: |_c, _e| { Transition::None } },
+                }
+            }
+        "#;
+        let fsm = parse_for_test(src).expect("macro should parse");
+        let active = fsm
+            .states
+            .iter()
+            .find(|s| s.name == "Active")
+            .expect("Active state");
+
+        let registry = FunctionRegistry::new();
+        let mut ex = TransitionExtractor::new(
+            "MyFsm".to_string(),
+            "Active".to_string(),
+            true,
+            &registry,
+        );
+        let parse = SourceFile::parse(&active.process_block, Edition::Edition2021);
+        ex.extract(&parse.tree().syntax());
+
+        let labels: Vec<String> = ex
+            .transitions
+            .iter()
+            .map(|t| format_label_for_mermaid(&t.label))
+            .collect();
+
+        let expected_some =
+            "MyEvent#colon;#colon;Wrapped<br/>{ inner#colon;Some(value) }";
+        let expected_none = "MyEvent#colon;#colon;Wrapped<br/>{ inner#colon;None }";
+
+        assert!(
+            labels.iter().any(|l| l == expected_some),
+            "missing properly-rendered Some(...) sub-pattern label\n  \
+             expected: {}\n  got: {:#?}",
+            expected_some,
+            labels,
+        );
+        assert!(
+            labels.iter().any(|l| l == expected_none),
+            "missing properly-rendered None sub-pattern label\n  \
+             expected: {}\n  got: {:#?}",
+            expected_none,
+            labels,
+        );
+    }
+
+    #[test]
     fn destructured_pattern_gets_br_and_spaces_end_to_end() {
         // Regression: destructured match patterns must render with a `<br/>`
         // line break before the brace and a single space between fields. The
