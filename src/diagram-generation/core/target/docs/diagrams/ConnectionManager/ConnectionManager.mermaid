@@ -1,0 +1,12 @@
+stateDiagram-v2
+
+    Disconnected --> Connecting : ConnectionEvent#colon;#colon;Connect
+    Connecting --> Connected : ConnectionEvent#colon;#colon;ConnectionEstablished
+    Connecting --> Failed : ConnectionEvent#colon;#colon;ConnectionFailed(error)<br/>[ if ctx.attempt_count >= ctx.max_retries ]
+    Connecting --> Retrying : ConnectionEvent#colon;#colon;ConnectionFailed(error)<br/>[ if ctx.attempt_count >= ctx.max_retries ]
+    Connecting --> Disconnected : ConnectionEvent#colon;#colon;Disconnect
+    Connected --> Disconnected : ConnectionEvent#colon;#colon;Disconnect
+    Connected --> Retrying : ConnectionEvent#colon;#colon;ConnectionLost
+    Retrying --> Connecting : ConnectionEvent#colon;#colon;RetryTimeout
+    Retrying --> Disconnected : ConnectionEvent#colon;#colon;Disconnect
+    Failed --> Connecting : ConnectionEvent#colon;#colon;Connect

@@ -1,0 +1,6 @@
+stateDiagram-v2
+
+    Idle --> Running : Input#colon;#colon;StartButton
+    Running --> Idle : Input#colon;#colon;StopButton
+    Running --> Error : Input#colon;#colon;SensorTick<br/>{ rpm }<br/>[ if *rpm>*target_speed+500 ]
+    Error --> Idle : Input#colon;#colon;StopButton

@@ -1,0 +1,6 @@
+stateDiagram-v2
+
+    Pending --> Processing : PaymentEvent#colon;#colon;Process
+    Processing --> Approved : PaymentEvent#colon;#colon;Approve
+    Processing --> Rejected : PaymentEvent#colon;#colon;Reject
+    Processing --> Failed : PaymentEvent#colon;#colon;Timeout

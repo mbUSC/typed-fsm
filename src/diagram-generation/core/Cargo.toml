@@ -6,4 +6,4 @@ edition = "2021"
 [dependencies]
 ra_ap_syntax = "0.0.336"
 serde = { version = "1.0", features = ["derive"], optional = true }
-mermaid-builder = { git = "ssh://git@github.com/mbUSC/mermaid-builder.git" }
+mermaid-builder = { git = "ssh://git@github.com/mbUSC/mermaid-builder.git", rev = "78673daf3c5dc5a47b73a2466dc362896aca2e69" }

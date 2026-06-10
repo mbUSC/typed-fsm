@@ -1,0 +1,5 @@
+stateDiagram-v2
+
+    LoggedOut --> Active : SessionEvent#colon;#colon;Login<br/>{ username }
+    Active --> LoggedOut : SessionEvent#colon;#colon;CheckTimeout<br/>[ if ctx.timer.is_expired() ]
+    Active --> LoggedOut : SessionEvent#colon;#colon;Logout

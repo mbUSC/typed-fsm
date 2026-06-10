@@ -1,0 +1,8 @@
+stateDiagram-v2
+
+    Idle --> WaitingPIN : ATMEvent#colon;#colon;InsertCard
+    WaitingPIN --> Authenticated : ATMEvent#colon;#colon;EnterPIN<br/>{ pin }<br/>[ if *pin == ctx.correct_pin ]
+    WaitingPIN --> Blocked : ATMEvent#colon;#colon;EnterPIN<br/>{ pin }<br/>[ if *pin == ctx.correct_pin and ctx.attempts >= 3 ]
+    WaitingPIN --> Idle : ATMEvent#colon;#colon;Cancel
+    Authenticated --> Idle : ATMEvent#colon;#colon;Withdraw<br/>{ amount }<br/>[ if *amount <= ctx.account_balance ]
+    Authenticated --> Idle : ATMEvent#colon;#colon;Cancel

@@ -5,7 +5,8 @@ use std::fs;
 use std::path::Path;
 use ra_ap_syntax::{ast::{self, AstNode, HasName}, match_ast, SourceFile, Edition};
 use typed_fsm_diagram_core::{
-    generate_mermaid_hierarchical, generate_mermaid_simple, FsmDefinition, SubFsmExtractor, parse_macro_body
+    analyze_function, collect_referenced_fsms, generate_mermaid_hierarchical,
+    generate_mermaid_simple, parse_macro_body, FsmDefinition, FunctionRegistry,
 };
 use walkdir::WalkDir;
 
@@ -97,20 +98,25 @@ fn default_breakdown() -> BreakdownMode {
 struct WorkspaceFinder {
     found_fsms: Vec<FsmDefinition>,
     found_structs: HashMap<String, HashMap<String, String>>,
-    found_functions: HashMap<String, HashSet<String>>,
+    found_functions: FunctionRegistry,
     found_aliases: HashMap<String, String>,
 }
 
 impl WorkspaceFinder {
-    fn scan_node(&mut self, node: ra_ap_syntax::SyntaxNode) {
+    fn scan_node(&mut self, node: ra_ap_syntax::SyntaxNode, source_path: &Path) {
         for child in node.descendants() {
             match_ast! {
                 match child {
                     ast::MacroCall(it) => {
                         if it.path().map(|p| p.syntax().text().to_string() == "state_machine").unwrap_or(false) {
                             if let Some(token_tree) = it.token_tree() {
-                                if let Some(fsm) = parse_macro_body(token_tree) {
-                                    self.found_fsms.push(fsm);
+                                match parse_macro_body(token_tree) {
+                                    Ok(fsm) => self.found_fsms.push(fsm),
+                                    Err(e) => eprintln!(
+                                        "warning: failed to parse state_machine! macro in {}: {}",
+                                        source_path.display(),
+                                        e,
+                                    ),
                                 }
                             }
                         }
@@ -146,20 +152,8 @@ impl WorkspaceFinder {
                         }
                     },
                     ast::Fn(it) => {
-                        if let Some(name) = it.name() {
-                            let func_name = name.text().to_string();
-                            let mut mentions = HashSet::new();
-                            if let Some(body) = it.body() {
-                                for descendant in body.syntax().descendants() {
-                                    if let Some(path) = ast::Path::cast(descendant) {
-                                        let path_str = path.syntax().text().to_string().replace(" ", "");
-                                        if path_str.contains("::") {
-                                            mentions.insert(path_str);
-                                        }
-                                    }
-                                }
-                            }
-                            self.found_functions.insert(func_name, mentions);
+                        if let Some((name, info)) = analyze_function(&it) {
+                            self.found_functions.record(name, info);
                         }
                     },
                     _ => ()
@@ -183,7 +177,30 @@ impl WorkspaceFinder {
 fn process_file(path: &Path, finder: &mut WorkspaceFinder) -> anyhow::Result<()> {
     let content = fs::read_to_string(path)?;
     let parse = SourceFile::parse(&content, Edition::Edition2021);
-    finder.scan_node(parse.tree().syntax().clone());
+    finder.scan_node(parse.tree().syntax().clone(), path);
+    Ok(())
+}
+
+/// Walk `root` and delete every regular file ending in `.mermaid`, then
+/// remove any directories left empty. Touches nothing else, so a
+/// misconfigured `output_dir` pointing at an unintended place no longer
+/// destroys unrelated data.
+fn clean_stale_diagrams(root: &Path) -> anyhow::Result<()> {
+    if !root.exists() {
+        return Ok(());
+    }
+    // contents_first: delete files before their parent dirs.
+    for entry in WalkDir::new(root).contents_first(true).into_iter().filter_map(|e| e.ok()) {
+        let path = entry.path();
+        if entry.file_type().is_file() {
+            if path.extension().map_or(false, |ext| ext == "mermaid") {
+                let _ = fs::remove_file(path);
+            }
+        } else if entry.file_type().is_dir() && path != root {
+            // Only remove if empty — leaves unrelated subdirs alone.
+            let _ = fs::remove_dir(path);
+        }
+    }
     Ok(())
 }
 
@@ -214,7 +231,7 @@ fn main() -> anyhow::Result<()> {
     let mut finder = WorkspaceFinder {
         found_fsms: vec![],
         found_structs: HashMap::new(),
-        found_functions: HashMap::new(),
+        found_functions: FunctionRegistry::new(),
         found_aliases: HashMap::new(),
     };
 
@@ -233,10 +250,13 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    // Clean start: Delete output directory if it exists to remove stale diagrams
+    // Clean start: drop only `.mermaid` files (and now-empty FSM subdirs)
+    // under the output directory. We deliberately do NOT `remove_dir_all` —
+    // that footgun has cost users data when the configured output_dir pointed
+    // somewhere unexpected. Leave unrelated files in place.
     if Path::new(&output_dir).exists() {
-        println!("Cleaning output directory: {}", output_dir);
-        fs::remove_dir_all(&output_dir)?;
+        println!("Cleaning stale .mermaid files under: {}", output_dir);
+        clean_stale_diagrams(Path::new(&output_dir))?;
     }
     fs::create_dir_all(&output_dir)?;
 
@@ -257,45 +277,11 @@ fn main() -> anyhow::Result<()> {
     // Identify Root FSMs (those not referenced by any other FSM)
     let mut all_children = HashSet::new();
     for fsm in &finder.found_fsms {
-        let mut extractor = SubFsmExtractor::new(fsm.name.clone());
-        for state in &fsm.states {
-            if let Some(entry) = &state.entry_block {
-                let parse = SourceFile::parse(entry, Edition::Edition2021);
-                extractor.extract(&parse.tree().syntax());
-            }
-            let parse = SourceFile::parse(&state.process_block, Edition::Edition2021);
-            extractor.extract(&parse.tree().syntax());
-            if let Some(exit) = &state.exit_block {
-                let parse = SourceFile::parse(exit, Edition::Edition2021);
-                extractor.extract(&parse.tree().syntax());
-            }
-            for (_, f_type) in &state.fields {
-                let parse = SourceFile::parse(f_type, Edition::Edition2021);
-                extractor.extract(&parse.tree().syntax());
-            }
-        }
-
-        // 1. Explicit discovery
-        for child in &extractor.discovered {
-            let resolved = finder.resolve_type(child);
-            all_children.insert(resolved);
-        }
-
-        // 2. Contextual discovery
-        if let Some(ctx_type) = &fsm.context_type {
-            let ctx_name = finder.resolve_type(&ctx_type.replace(" ", ""));
-            if let Some(fields) = finder.found_structs.get(&ctx_name) {
-                for field_name in extractor.context_fields {
-                    if let Some(type_name) = fields.get(&field_name) {
-                        let resolved_type = finder.resolve_type(type_name);
-                        let base_type = resolved_type.split("::").last().unwrap_or(&resolved_type);
-                        if fsm_map.contains_key(base_type) {
-                            all_children.insert(base_type.to_string());
-                        }
-                    }
-                }
-            }
-        }
+        all_children.extend(collect_referenced_fsms(
+            fsm,
+            &finder.found_structs,
+            |t| finder.resolve_type(t),
+        ));
     }
 
     let root_fsms: Vec<&FsmDefinition> = finder
@@ -318,7 +304,7 @@ fn main() -> anyhow::Result<()> {
 
         let content = match config.mermaid.mode {
             DiagramMode::Simple => {
-                generate_mermaid_simple(fsm, include_guards, &finder.found_functions)
+                generate_mermaid_simple(fsm, include_guards, &finder.found_functions)?
             }
             DiagramMode::Hierarchical => generate_mermaid_hierarchical(
                 fsm,
@@ -327,7 +313,7 @@ fn main() -> anyhow::Result<()> {
                 include_guards,
                 &finder.found_functions,
                 resolver,
-            ),
+            )?,
         };
 
         let path = fsm_output_dir.join(format!("{}.mermaid", name));
@@ -396,10 +382,11 @@ fn save_breakdown<F>(
     sub_dir: &str,
     nested: bool,
     include_guards: bool,
-    function_mentions: &HashMap<String, HashSet<String>>,
+    function_registry: &FunctionRegistry,
     resolve_type: F,
-) -> anyhow::Result<()> 
-where F: Fn(&str) -> String + Copy
+) -> anyhow::Result<()>
+where
+    F: Fn(&str) -> String + Copy,
 {
     let mut discovered = HashSet::new();
     collect_all_subfsms(fsm, all_fsms, struct_map, &mut discovered, resolve_type);
@@ -419,11 +406,11 @@ where F: Fn(&str) -> String + Copy
                     all_fsms,
                     struct_map,
                     include_guards,
-                    function_mentions,
+                    function_registry,
                     resolve_type,
-                )
+                )?
             } else {
-                generate_mermaid_simple(sub_fsm, include_guards, function_mentions)
+                generate_mermaid_simple(sub_fsm, include_guards, function_registry)?
             };
             let path = target_dir.join(format!("{}.mermaid", sub_name));
             fs::write(path, content)?;
@@ -438,47 +425,12 @@ fn collect_all_subfsms<F>(
     struct_map: &HashMap<String, HashMap<String, String>>,
     discovered: &mut HashSet<String>,
     resolve_type: F,
-) where F: Fn(&str) -> String + Copy
+) where
+    F: Fn(&str) -> String + Copy,
 {
-    let mut extractor = SubFsmExtractor::new(fsm.name.clone());
-    for state in &fsm.states {
-        if let Some(entry) = &state.entry_block {
-            let parse = SourceFile::parse(entry, Edition::Edition2021);
-            extractor.extract(&parse.tree().syntax());
-        }
-        let parse = SourceFile::parse(&state.process_block, Edition::Edition2021);
-        extractor.extract(&parse.tree().syntax());
-        if let Some(exit) = &state.exit_block {
-            let parse = SourceFile::parse(exit, Edition::Edition2021);
-            extractor.extract(&parse.tree().syntax());
-        }
-        for (_, f_type) in &state.fields {
-            let parse = SourceFile::parse(f_type, Edition::Edition2021);
-            extractor.extract(&parse.tree().syntax());
-        }
-    }
+    let referenced = collect_referenced_fsms(fsm, struct_map, resolve_type);
 
-    let mut all_found = HashSet::new();
-    for child in extractor.discovered {
-        all_found.insert(resolve_type(&child));
-    }
-
-    if let Some(ctx_type) = &fsm.context_type {
-        let ctx_name = resolve_type(&ctx_type.replace(" ", ""));
-        if let Some(fields) = struct_map.get(&ctx_name) {
-            for field_name in extractor.context_fields {
-                if let Some(type_name) = fields.get(&field_name) {
-                    let resolved_type = resolve_type(type_name);
-                    let base_type = resolved_type.split("::").last().unwrap_or(&resolved_type);
-                    if all_fsms.contains_key(base_type) {
-                        all_found.insert(base_type.to_string());
-                    }
-                }
-            }
-        }
-    }
-
-    for sub_name in all_found {
+    for sub_name in referenced {
         if all_fsms.contains_key(&sub_name) && !discovered.contains(&sub_name) {
             discovered.insert(sub_name.clone());
             if let Some(sub_fsm) = all_fsms.get(&sub_name) {

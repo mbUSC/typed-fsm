@@ -1,0 +1,10 @@
+stateDiagram-v2
+
+    Idle --> Processing : TaskEvent#colon;#colon;NewTask
+    Idle --> Shutdown : TaskEvent#colon;#colon;Shutdown
+    Processing --> Idle : TaskEvent#colon;#colon;TaskComplete<br/>[ if ctx.active_tasks == 0 ]
+    Processing --> Paused : TaskEvent#colon;#colon;TaskFailed<br/>[ if ctx.failed_tasks >= 3 ]
+    Processing --> Paused : TaskEvent#colon;#colon;Pause
+    Processing --> Shutdown : TaskEvent#colon;#colon;Shutdown
+    Paused --> Processing : TaskEvent#colon;#colon;Resume
+    Paused --> Shutdown : TaskEvent#colon;#colon;Shutdown

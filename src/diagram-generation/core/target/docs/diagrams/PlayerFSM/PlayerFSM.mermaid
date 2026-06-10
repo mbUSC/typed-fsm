@@ -1,0 +1,13 @@
+stateDiagram-v2
+
+    state Playing {
+        Low --> Medium : VolumeEvent#colon;#colon;VolumeUp
+        Medium --> High : VolumeEvent#colon;#colon;VolumeUp
+        Medium --> Low : VolumeEvent#colon;#colon;VolumeDown
+        High --> Medium : VolumeEvent#colon;#colon;VolumeDown
+    }
+    Stopped --> Playing : PlayerEvent#colon;#colon;Play
+    Playing --> Paused : PlayerEvent#colon;#colon;Pause
+    Playing --> Stopped : PlayerEvent#colon;#colon;Stop
+    Paused --> Playing : PlayerEvent#colon;#colon;Play
+    Paused --> Stopped : PlayerEvent#colon;#colon;Stop
