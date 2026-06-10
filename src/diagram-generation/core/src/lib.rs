@@ -22,57 +22,39 @@ pub struct StateDefinition {
 pub fn clean_tokens(s: String) -> String {
     let mut res = s.replace('\n', " ").replace('\r', " ");
 
-    res = res.replace("{", " { ").replace("}", " } ").replace(",", " , ");
-
-    // Use natural language for logical operators and space out others
-    res = res
-        .replace("==", " == ")
-        .replace("!=", " != ")
-        .replace(">=", " >= ")
-        .replace("<=", " <= ")
-        .replace("&&", " and ")
-        .replace("||", " or ")
-        .replace("|", " | ")
-        .replace("=", " = ")
-        .replace(">", " > ")
-        .replace("<", " < ")
-        .replace("+", " + ")
-        .replace("-", " - ")
-        .replace("*", " * ")
-        .replace("/", " / ");
-
-    res.split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .replace("= >", "=>")
-        .replace("- >", "->")
-        .replace("+ =", "+=")
-        .replace("- =", "-=")
-        .replace("* =", "*=")
-        .replace("/ =", "/=")
-        .replace("! =", "!=")
-        .replace("< =", "<=")
-        .replace("> =", ">=")
-        .replace("= =", "==")
-        .replace(" : ", ":")
-        .replace(" :: ", "::")
-        .replace(" . ", ".")
-        .replace(" .", ".")
-        .replace(". ", ".")
-        .replace(" ( ", "(")
-        .replace(" ) ", ")")
-        .replace(" (", "(")
-        .replace("( ", "(")
-        .replace(" )", ")")
-        .replace(" , ", ", ")
-        .replace(" & ", "&")
-        .replace(" ; ", ";")
-        .replace(" [ ", "[")
-        .replace(" ] ", "]")
-        .replace(", }", " }") // Remove trailing comma before closing brace
-        .replace(" { ", "<br/>{ ")
-        .replace(" }", " }")
-        .replace("! ", "!")
+    // logical and comparison operators
+    res = res.replace("&&", " and ")
+             .replace("||", " or ")
+             .replace("==", " == ")
+             .replace("!=", " != ")
+             .replace(">=", " >= ")
+             .replace("<=", " <= ");
+    
+    // Ensure mashed punctuation is separated
+    res = res.replace("{", " { ").replace("}", " } ").replace(",", " , ").replace("|", " | ");
+    
+    // Normalize spaces
+    let tokens: Vec<_> = res.split_whitespace().collect();
+    let mut res = tokens.join(" ");
+    
+    // Cleanup and formatting
+    res = res.replace(" : : ", "::")
+             .replace(" :: ", "::")
+             .replace(" : ", ":")
+             .replace(" ( ", "(")
+             .replace(" (", "(")
+             .replace("( ", "(")
+             .replace(" ) ", ")")
+             .replace(" )", ")")
+             .replace(" , ", ", ")
+             .replace(", }", " }")
+             .replace(" {", "<br/>{")
+             .replace(" . ", ".")
+             .replace(" .", ".")
+             .replace(". ", ".")
+             .replace("! ", "!");
+             
+    res.trim().to_string()
 }
 
 pub struct TransitionInfo {
@@ -789,7 +771,7 @@ mod tests {
         let input = "Apply{a,b,}".to_string();
         assert_eq!(clean_tokens(input), "Apply<br/>{ a, b }");
 
-        let input = "HeaderScheduleEvent :: Apply { resweep , force_occupancy_broadcast , occupancy_changed , }".to_string();
+        let input = "HeaderScheduleEvent::Apply{resweep,force_occupancy_broadcast,occupancy_changed,}".to_string();
         assert_eq!(clean_tokens(input), "HeaderScheduleEvent::Apply<br/>{ resweep, force_occupancy_broadcast, occupancy_changed }");
     }
 }
