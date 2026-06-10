@@ -22,13 +22,3 @@ mod fsm;
 
 // Re-export the core types
 pub use fsm::Transition;
-
-#[cfg(feature = "diagram")]
-pub use diagram_generation::generate_diagram;
-
-#[cfg(feature = "diagram")]
-#[doc(hidden)]
-pub use fsm::diagram_helpers;
-
-#[cfg(feature = "diagram")]
-pub use mermaid_builder;

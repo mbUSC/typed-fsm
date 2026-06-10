@@ -21,17 +21,20 @@ scan_dir = "src"       # Where to scan for FSMs (directory or single file)
 output_dir = "docs/diagrams"
 mode = "Hierarchical" # Options: "Simple" (single level) | "Hierarchical" (nested states)
 breakdown = "Both"    # Options: "None" | "Flat" | "Nested" | "Both"
+include_guards = true # Whether to show guards (default: true)
 ```
 
 ### Overrides
 You can override the `.typed-fsm.toml` options using command line args.
 
-For example, to override the directory to scan to `examples/`:
+For example, to hide guards:
 ```bash
-cargo run -p fsm-gen -- --src examples/
+cargo run -p fsm-gen -- --include-guards=false
 ```
 
-To also override the output path to `some_other_folder/`:
+To override the directory to scan to `examples/`:
 ```bash
-cargo run -p fsm-gen -- --src examples/ --output some_other_folder/
+cargo run -p fsm-gen -- --scan examples/
 ```
+
+> **Note**: You do NOT need to add any features or extra dependencies to your project to use `fsm-gen`. It uses static analysis to generate diagrams without compiling your code.

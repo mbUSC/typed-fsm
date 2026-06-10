@@ -41,156 +41,6 @@ macro_rules! __fsm_log {
     };
 }
 
-/// Internal helpers for magic diagram generation.
-#[doc(hidden)]
-#[cfg(feature = "diagram")]
-pub mod diagram_helpers {
-    use core::marker::PhantomData;
-    use crate::mermaid_builder::prelude::*;
-
-    /// Controls how an FSM diagram is visually rendered.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub enum DiagramMode {
-        /// Each FSM is rendered as a single-level diagram (no nesting).
-        Simple,
-        /// Sub-FSMs are visually nested within their parent states.
-        Hierarchical,
-    }
-
-    /// Controls how sub-FSM files are organized during export.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub enum BreakdownMode {
-        /// No sub-FSM files are generated.
-        None,
-        /// Generate a "breakdown" directory containing single-level FSM files.
-        Flat,
-        /// Generate a "breakdown" directory with a recursive tree of nested FSM files.
-        Nested,
-        /// Generate both "breakdown_flat" and "breakdown_nested" directories.
-        Both,
-    }
-
-    /// Configuration for diagram generation.
-    #[derive(Debug, Clone)]
-    pub struct DiagramOptions {
-        /// How the current FSM diagram string should be rendered.
-        pub mode: DiagramMode,
-        /// Whether to generate additional files for sub-FSMs.
-        pub breakdown: BreakdownMode,
-        /// List of FSM type names to exclude from generation.
-        pub excluded_types: &'static [&'static str],
-        /// Whether to include transition guards in the diagram.
-        pub include_guards: bool,
-    }
-
-    impl Default for DiagramOptions {
-        fn default() -> Self {
-            Self {
-                mode: DiagramMode::Hierarchical,
-                breakdown: BreakdownMode::Both,
-                excluded_types: &[],
-                include_guards: true,
-            }
-        }
-    }
-
-    pub trait FsmMetadata {
-        fn fsm_name() -> &'static str;
-        fn populate_diagram(builder: &mut StateDiagramBuilder, options: &DiagramOptions) -> Result<(), ::std::boxed::Box<dyn ::core::error::Error>>;
-    }
-
-    pub struct Tag;
-
-    pub trait FsmMetadataHigh {
-        fn populate_child<T: FsmMetadata>(&self, builder: &mut StateDiagramBuilder, options: &DiagramOptions, _phantom: PhantomData<T>) -> Result<(), ::std::boxed::Box<dyn ::core::error::Error>>;
-    }
-
-    impl FsmMetadataHigh for &&Tag {
-        #[allow(dead_code)]
-        fn populate_child<T: FsmMetadata>(&self, builder: &mut StateDiagramBuilder, options: &DiagramOptions, _phantom: PhantomData<T>) -> Result<(), ::std::boxed::Box<dyn ::core::error::Error>> {
-            for excluded in options.excluded_types {
-                if *excluded == T::fsm_name() {
-                    return Ok(());
-                }
-            }
-            T::populate_diagram(builder, options)
-        }
-    }
-
-    pub trait FsmMetadataLow {
-        fn populate_child<T>(&self, _builder: &mut StateDiagramBuilder, _options: &DiagramOptions, _phantom: PhantomData<T>) -> Result<(), ::std::boxed::Box<dyn ::core::error::Error>>;
-    }
-
-    impl FsmMetadataLow for &Tag {
-        #[allow(dead_code)]
-        fn populate_child<T>(&self, _builder: &mut StateDiagramBuilder, _options: &DiagramOptions, _phantom: PhantomData<T>) -> Result<(), ::std::boxed::Box<dyn ::core::error::Error>> {
-            Ok(())
-        }
-    }
-
-    pub trait FsmExporter {
-        fn fsm_name() -> &'static str;
-        fn save_diagrams(path: &::std::path::Path, options: &DiagramOptions) -> ::std::io::Result<()>;
-        fn save_breakdown_flat(path: &::std::path::Path, options: &DiagramOptions) -> ::std::io::Result<()>;
-        fn save_breakdown_nested(path: &::std::path::Path, options: &DiagramOptions) -> ::std::io::Result<()>;
-    }
-
-    pub struct ExportTag;
-
-    pub trait ExportHighPriority {
-        fn export_child<T: FsmExporter>(self, path: &::std::path::Path, options: &DiagramOptions) -> ::std::io::Result<()>;
-        fn export_breakdown_flat<T: FsmExporter>(self, path: &::std::path::Path, options: &DiagramOptions) -> ::std::io::Result<()>;
-        fn export_breakdown_nested<T: FsmExporter>(self, path: &::std::path::Path, options: &DiagramOptions) -> ::std::io::Result<()>;
-    }
-
-    impl ExportHighPriority for &&ExportTag {
-        fn export_child<T: FsmExporter>(self, path: &::std::path::Path, options: &DiagramOptions) -> ::std::io::Result<()> {
-            for excluded in options.excluded_types {
-                if *excluded == T::fsm_name() {
-                    return Ok(());
-                }
-            }
-            T::save_diagrams(path, options)
-        }
-
-        fn export_breakdown_flat<T: FsmExporter>(self, path: &::std::path::Path, options: &DiagramOptions) -> ::std::io::Result<()> {
-            for excluded in options.excluded_types {
-                if *excluded == T::fsm_name() {
-                    return Ok(());
-                }
-            }
-            T::save_breakdown_flat(path, options)
-        }
-
-        fn export_breakdown_nested<T: FsmExporter>(self, path: &::std::path::Path, options: &DiagramOptions) -> ::std::io::Result<()> {
-            for excluded in options.excluded_types {
-                if *excluded == T::fsm_name() {
-                    return Ok(());
-                }
-            }
-            T::save_breakdown_nested(path, options)
-        }
-    }
-
-    pub trait ExportLowPriority {
-        fn export_child<T>(self, _path: &::std::path::Path, _options: &DiagramOptions) -> ::std::io::Result<()>;
-        fn export_breakdown_flat<T>(self, _path: &::std::path::Path, _options: &DiagramOptions) -> ::std::io::Result<()>;
-        fn export_breakdown_nested<T>(self, _path: &::std::path::Path, _options: &DiagramOptions) -> ::std::io::Result<()>;
-    }
-
-    impl ExportLowPriority for &ExportTag {
-        fn export_child<T>(self, _path: &::std::path::Path, _options: &DiagramOptions) -> ::std::io::Result<()> {
-            Ok(())
-        }
-        fn export_breakdown_flat<T>(self, _path: &::std::path::Path, _options: &DiagramOptions) -> ::std::io::Result<()> {
-            Ok(())
-        }
-        fn export_breakdown_nested<T>(self, _path: &::std::path::Path, _options: &DiagramOptions) -> ::std::io::Result<()> {
-            Ok(())
-        }
-    }
-}
-
 /// Represents the result of a state processing step.
 ///
 /// This enum guides the state machine on whether to stay or switch states.
@@ -708,22 +558,6 @@ macro_rules! state_machine {
                 }
             }
         }
-
-        #[cfg(feature = "diagram")]
-        $crate::generate_diagram! {
-            Name: $enum_name,
-            Context: $ctx_type,
-            Event: $event_type,
-            States: {
-                $(
-                    $state_name $( { $($field_name : $field_type),* } )? => {
-                        $( entry: |$entry_ctx| $entry_block )?
-                        process: |$ctx_var, $evt_var| $process_block
-                        $( exit: |$exit_ctx| $exit_block )?
-                    }
-                ),*
-            }
-        }
     };
 }
 
@@ -1111,22 +945,6 @@ macro_rules! state_machine {
                         }
                     }
                 }
-            }
-        }
-
-        #[cfg(feature = "diagram")]
-        $crate::generate_diagram! {
-            Name: $enum_name,
-            Context: $ctx_type,
-            Event: $event_type,
-            States: {
-                $(
-                    $state_name $( { $($field_name : $field_type),* } )? => {
-                        $( entry: |$entry_ctx| $entry_block )?
-                        process: |$ctx_var, $evt_var| $process_block
-                        $( exit: |$exit_ctx| $exit_block )?
-                    }
-                ),*
             }
         }
     };
