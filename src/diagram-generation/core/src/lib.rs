@@ -22,6 +22,8 @@ pub struct StateDefinition {
 pub fn clean_tokens(s: String) -> String {
     let mut res = s.replace('\n', " ").replace('\r', " ");
 
+    res = res.replace("{", " { ").replace("}", " } ").replace(",", " , ");
+
     // Use natural language for logical operators and space out others
     res = res
         .replace("==", " == ")
@@ -30,6 +32,7 @@ pub fn clean_tokens(s: String) -> String {
         .replace("<=", " <= ")
         .replace("&&", " and ")
         .replace("||", " or ")
+        .replace("|", " | ")
         .replace("=", " = ")
         .replace(">", " > ")
         .replace("<", " < ")
@@ -66,12 +69,9 @@ pub fn clean_tokens(s: String) -> String {
         .replace(" ; ", ";")
         .replace(" [ ", "[")
         .replace(" ] ", "]")
-        .replace(" { ", "{")
-        .replace(" } ", "}")
-        .replace(" {", "{")
-        .replace("{ ", "{")
-        .replace(" }", "}")
-        .replace("} ", "}")
+        .replace(", }", " }") // Remove trailing comma before closing brace
+        .replace(" { ", "<br/>{ ")
+        .replace(" }", " }")
         .replace("! ", "!")
 }
 
@@ -615,6 +615,7 @@ pub fn generate_mermaid_simple(
     StateDiagram::from(builder)
         .to_string()
         .replace("\r\n", "\n")
+        .replace("    direction LR\n", "")
 }
 
 fn populate_builder_hierarchical<F>(
@@ -755,6 +756,7 @@ where
     StateDiagram::from(builder)
         .to_string()
         .replace("\r\n", "\n")
+        .replace("    direction LR\n", "")
 }
 
 #[cfg(test)]
@@ -777,5 +779,14 @@ mod tests {
         
         let input = "a && b || c".to_string();
         assert_eq!(clean_tokens(input), "a and b or c");
+
+        let input = "HeaderScheduleEvent :: Apply { resweep , force_occupancy_broadcast , occupancy_changed , }".to_string();
+        assert_eq!(clean_tokens(input), "HeaderScheduleEvent::Apply<br/>{ resweep, force_occupancy_broadcast, occupancy_changed }");
+
+        let input = "Event :: A | Event :: B".to_string();
+        assert_eq!(clean_tokens(input), "Event::A | Event::B");
+
+        let input = "Apply{a,b,}".to_string();
+        assert_eq!(clean_tokens(input), "Apply<br/>{ a, b }");
     }
 }
