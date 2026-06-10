@@ -1,0 +1,6 @@
+[mermaid]
+scan_dir = "examples"
+output_dir = "target/docs/diagrams"
+mode = "Hierarchical"
+breakdown = "Both"
+include_guards = true

@@ -1,130 +1,78 @@
-use syn::{parse::{Parse, ParseStream}, Token, Ident, braced, Expr, visit::{self, Visit}, Type, Arm, ExprIf};
-use quote::quote;
-use std::collections::{HashMap, HashSet};
 use mermaid_builder::prelude::*;
+use ra_ap_syntax::{
+    ast::{self, AstNode, HasArgList},
+    match_ast, Edition, SourceFile, SyntaxKind, SyntaxNode, SyntaxToken, T,
+};
+use std::collections::{HashMap, HashSet};
 
 pub struct FsmDefinition {
-    pub name: Ident,
-    pub context_type: Option<Type>,
+    pub name: String,
+    pub context_type: Option<String>,
     pub states: Vec<StateDefinition>,
 }
 
 pub struct StateDefinition {
-    pub name: Ident,
-    pub fields: Vec<(Ident, Type)>,
-    pub entry_block: Option<Expr>,
-    pub process_block: Expr,
-    pub exit_block: Option<Expr>,
+    pub name: String,
+    pub fields: Vec<(String, String)>,
+    pub entry_block: Option<String>,
+    pub process_block: String,
+    pub exit_block: Option<String>,
 }
 
-impl Parse for FsmDefinition {
-    fn parse(input: ParseStream) -> syn::Result<Self> {
-        let mut name = None;
-        let mut context_type = None;
-        let mut states = Vec::new();
+pub fn clean_tokens(s: String) -> String {
+    let mut res = s.replace('\n', " ").replace('\r', " ");
 
-        while !input.is_empty() {
-            if input.peek(Ident) {
-                let fork = input.fork();
-                let id: Ident = fork.parse()?;
-                if id == "Name" {
-                    input.parse::<Ident>()?; // "Name"
-                    input.parse::<Token![:]>()?;
-                    name = Some(input.parse::<Ident>()?);
-                    if input.peek(Token![,]) { input.parse::<Token![,]>()?; }
-                } else if id == "Context" {
-                    input.parse::<Ident>()?; // "Context"
-                    input.parse::<Token![:]>()?;
-                    context_type = Some(input.parse::<Type>()?);
-                    if input.peek(Token![,]) { input.parse::<Token![,]>()?; }
-                } else if id == "States" {
-                    input.parse::<Ident>()?; // "States"
-                    input.parse::<Token![:]>()?;
-                    
-                    let content;
-                    braced!(content in input);
-                    
-                    while !content.is_empty() {
-                        let state_name: Ident = content.parse()?;
-                        
-                        let mut fields = Vec::new();
-                        if content.peek(syn::token::Brace) {
-                            let field_content;
-                            braced!(field_content in content);
-                            while !field_content.is_empty() {
-                                let f_name: Ident = field_content.parse()?;
-                                field_content.parse::<Token![:]>()?;
-                                let f_type: Type = field_content.parse()?;
-                                fields.push((f_name, f_type));
-                                if field_content.peek(Token![,]) {
-                                    field_content.parse::<Token![,]>()?;
-                                }
-                            }
-                        }
-                        
-                        content.parse::<Token![=>]>()?;
-                        
-                        let state_content;
-                        braced!(state_content in content);
-                        
-                        let mut entry_block = None;
-                        let mut process_block = None;
-                        let mut exit_block = None;
-                        
-                        while !state_content.is_empty() {
-                            let fork = state_content.fork();
-                            if let Ok(key) = fork.parse::<Ident>() {
-                                if key == "process" {
-                                    state_content.parse::<Ident>()?;
-                                    state_content.parse::<Token![:]>()?;
-                                    process_block = Some(state_content.parse::<Expr>()?);
-                                } else if key == "entry" {
-                                    state_content.parse::<Ident>()?;
-                                    state_content.parse::<Token![:]>()?;
-                                    entry_block = Some(state_content.parse::<Expr>()?);
-                                } else if key == "exit" {
-                                    state_content.parse::<Ident>()?;
-                                    state_content.parse::<Token![:]>()?;
-                                    exit_block = Some(state_content.parse::<Expr>()?);
-                                } else {
-                                    state_content.parse::<proc_macro2::TokenTree>()?;
-                                }
-                            } else {
-                                state_content.parse::<proc_macro2::TokenTree>()?;
-                            }
-                            
-                            if state_content.peek(Token![,]) {
-                                state_content.parse::<Token![,]>()?;
-                            }
-                        }
-                        
-                        if let Some(pb) = process_block {
-                            states.push(StateDefinition {
-                                name: state_name,
-                                fields,
-                                entry_block,
-                                process_block: pb,
-                                exit_block,
-                            });
-                        }
-                        
-                        if content.peek(Token![,]) {
-                            content.parse::<Token![,]>()?;
-                        }
-                    }
-                    if input.peek(Token![,]) { input.parse::<Token![,]>()?; }
-                } else {
-                    input.parse::<proc_macro2::TokenTree>()?;
-                }
-            } else {
-                input.parse::<proc_macro2::TokenTree>()?;
-            }
-        }
+    // Use natural language for logical operators and space out others
+    res = res
+        .replace("==", " == ")
+        .replace("!=", " != ")
+        .replace(">=", " >= ")
+        .replace("<=", " <= ")
+        .replace("&&", " and ")
+        .replace("||", " or ")
+        .replace("=", " = ")
+        .replace(">", " > ")
+        .replace("<", " < ")
+        .replace("+", " + ")
+        .replace("-", " - ")
+        .replace("*", " * ")
+        .replace("/", " / ");
 
-        let name = name.ok_or_else(|| input.error("Missing 'Name' in state_machine!"))?;
-
-        Ok(FsmDefinition { name, context_type, states })
-    }
+    res.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .replace("= >", "=>")
+        .replace("- >", "->")
+        .replace("+ =", "+=")
+        .replace("- =", "-=")
+        .replace("* =", "*=")
+        .replace("/ =", "/=")
+        .replace("! =", "!=")
+        .replace("< =", "<=")
+        .replace("> =", ">=")
+        .replace("= =", "==")
+        .replace(" : ", ":")
+        .replace(" :: ", "::")
+        .replace(" . ", ".")
+        .replace(" .", ".")
+        .replace(". ", ".")
+        .replace(" ( ", "(")
+        .replace(" ) ", ")")
+        .replace(" (", "(")
+        .replace("( ", "(")
+        .replace(" )", ")")
+        .replace(" , ", ", ")
+        .replace(" & ", "&")
+        .replace(" ; ", ";")
+        .replace(" [ ", "[")
+        .replace(" ] ", "]")
+        .replace(" { ", "{")
+        .replace(" } ", "}")
+        .replace(" {", "{")
+        .replace("{ ", "{")
+        .replace(" }", "}")
+        .replace("} ", "}")
+        .replace("! ", "!")
 }
 
 pub struct TransitionInfo {
@@ -133,7 +81,7 @@ pub struct TransitionInfo {
     pub label: String,
 }
 
-pub struct TransitionVisitor<'a> {
+pub struct TransitionExtractor<'a> {
     pub fsm_name: String,
     pub source_state: String,
     pub current_label: Option<String>,
@@ -143,82 +91,13 @@ pub struct TransitionVisitor<'a> {
     pub visited_functions: HashSet<String>,
 }
 
-impl<'ast, 'a> Visit<'ast> for TransitionVisitor<'a> {
-    fn visit_arm(&mut self, i: &'ast Arm) {
-        let pat = &i.pat;
-        let mut label = clean_tokens(quote!(#pat).to_string());
-        if self.include_guards {
-            if let Some((_, guard)) = &i.guard {
-                let guard_str = clean_tokens(quote!(#guard).to_string());
-                label.push_str(&format!(" [if {}]", guard_str));
-            }
-        }
-        
-        let old_label = self.current_label.clone();
-        if let Some(ref current) = self.current_label {
-            self.current_label = Some(format!("{} {}", current, label));
-        } else {
-            self.current_label = Some(label);
-        }
-        
-        visit::visit_arm(self, i);
-        self.current_label = old_label;
-    }
-
-    fn visit_expr_if(&mut self, i: &'ast ExprIf) {
-        let cond = &i.cond;
-        let label = if self.include_guards {
-            format!("[if {}]", clean_tokens(quote!(#cond).to_string()))
-        } else {
-            String::new()
-        };
-        
-        let old_label = self.current_label.clone();
-        if let Some(ref current) = self.current_label {
-            if label.is_empty() {
-                self.current_label = Some(current.clone());
-            } else {
-                self.current_label = Some(format!("{} {}", current, label));
-            }
-        } else if !label.is_empty() {
-            self.current_label = Some(label);
-        }
-
-        visit::visit_expr_if(self, i);
-        self.current_label = old_label;
-    }
-
-    fn visit_expr_call(&mut self, i: &'ast syn::ExprCall) {
-        if let Expr::Path(ref p) = *i.func {
-            let path_str = quote!(#p).to_string().replace(" ", "");
-            if path_str.contains("Transition::To") {
-                if let Some(arg) = i.args.first() {
-                    if let Some(target) = self.extract_target_state(arg) {
-                        self.transitions.push(TransitionInfo {
-                            source: self.source_state.clone(),
-                            target,
-                            label: self.current_label.clone().unwrap_or_default().trim().to_string(),
-                        });
-                    }
-                }
-            } else {
-                // Heuristic: this might be a helper function call
-                let func_name = path_str.split("::").last().unwrap_or(&path_str).to_string();
-                self.follow_function(&func_name);
-            }
-        }
-        visit::visit_expr_call(self, i);
-    }
-
-    fn visit_expr_method_call(&mut self, i: &'ast syn::ExprMethodCall) {
-        let method_name = i.method.to_string();
-        self.follow_function(&method_name);
-        visit::visit_expr_method_call(self, i);
-    }
-}
-
-impl<'a> TransitionVisitor<'a> {
-    pub fn new(fsm_name: String, source_state: String, include_guards: bool, function_mentions: &'a HashMap<String, HashSet<String>>) -> Self {
+impl<'a> TransitionExtractor<'a> {
+    pub fn new(
+        fsm_name: String,
+        source_state: String,
+        include_guards: bool,
+        function_mentions: &'a HashMap<String, HashSet<String>>,
+    ) -> Self {
         Self {
             fsm_name,
             source_state,
@@ -230,6 +109,133 @@ impl<'a> TransitionVisitor<'a> {
         }
     }
 
+    fn merge_labels(&self, current: Option<String>, new: String, is_guard: bool) -> String {
+        if let Some(c) = current {
+            if is_guard {
+                if c.contains("<br/>[ if ") {
+                    // Combine with existing guard
+                    let parts: Vec<&str> = c.split("<br/>[ if ").collect();
+                    let event = parts[0];
+                    let mut guard = parts[1].trim_end_matches(" ]").to_string();
+                    guard.push_str(" and ");
+                    guard.push_str(&new);
+                    format!("{}<br/>[ if {} ]", event, guard)
+                } else {
+                    // Add new guard to event
+                    format!("{}<br/>[ if {} ]", c, new)
+                }
+            } else {
+                // Combine event names
+                format!("{} {}", c, new)
+            }
+        } else if is_guard {
+            format!("<br/>[ if {} ]", new)
+        } else {
+            new
+        }
+    }
+
+    pub fn extract(&mut self, node: &SyntaxNode) {
+        match_ast! {
+            match node {
+                ast::MatchArm(it) => {
+                    let pat = it.pat().map(|p| p.syntax().text().to_string()).unwrap_or_default();
+                    let pat_label = clean_tokens(pat);
+                    
+                    let old_label = self.current_label.clone();
+                    self.current_label = Some(self.merge_labels(old_label.clone(), pat_label, false));
+
+                    if self.include_guards {
+                        if let Some(guard) = it.guard() {
+                            let guard_str = clean_tokens(guard.syntax().text().to_string());
+                            let mid_label = self.current_label.clone();
+                            self.current_label = Some(self.merge_labels(mid_label, guard_str, true));
+                        }
+                    }
+
+                    if let Some(expr) = it.expr() {
+                        self.extract(expr.syntax());
+                    }
+
+                    self.current_label = old_label;
+                },
+                ast::IfExpr(it) => {
+                    let cond_str = if let Some(cond) = it.condition() {
+                        clean_tokens(cond.syntax().text().to_string())
+                    } else {
+                        String::new()
+                    };
+
+                    let old_label = self.current_label.clone();
+                    
+                    if !cond_str.is_empty() {
+                        if self.include_guards {
+                             // Heuristic: if it looks like an event match (if let Event::X = evt)
+                             // we treat it as an event, otherwise as a guard.
+                             let is_event = cond_str.contains("let") && (cond_str.contains("evt") || cond_str.contains("event"));
+                             self.current_label = Some(self.merge_labels(old_label.clone(), cond_str, !is_event));
+                        }
+                    }
+
+                    if let Some(block) = it.then_branch() {
+                        self.extract(block.syntax());
+                    }
+                    if let Some(else_branch) = it.else_branch() {
+                        match else_branch {
+                            ast::ElseBranch::Block(b) => self.extract(b.syntax()),
+                            ast::ElseBranch::IfExpr(e) => self.extract(e.syntax()),
+                        }
+                    }
+
+                    self.current_label = old_label;
+                },
+                ast::CallExpr(it) => {
+                    if let Some(expr) = it.expr() {
+                        let path_str = expr.syntax().text().to_string().replace(" ", "");
+                        if path_str.contains("Transition::To") {
+                            if let Some(arg_list) = it.arg_list() {
+                                if let Some(arg) = arg_list.args().next() {
+                                    if let Some(target) = self.extract_target_state(&arg.syntax()) {
+                                        self.transitions.push(TransitionInfo {
+                                            source: self.source_state.clone(),
+                                            target,
+                                            label: self
+                                                .current_label
+                                                .clone()
+                                                .unwrap_or_default()
+                                                .trim()
+                                                .to_string(),
+                                        });
+                                    }
+                                }
+                            }
+                        } else {
+                            let func_name = path_str.split("::").last().unwrap_or(&path_str).to_string();
+                            self.follow_function(&func_name);
+                        }
+                    }
+                    for child in node.children() {
+                        self.extract(&child);
+                    }
+                },
+                ast::MethodCallExpr(it) => {
+                    if let Some(name) = it.name_ref() {
+                        let method_name = name.text().to_string();
+                        self.follow_function(&method_name);
+                    }
+                    for child in node.children() {
+                        self.extract(&child);
+                    }
+                },
+                _ => {
+                    for child in node.children() {
+                        self.extract(&child);
+                    }
+                }
+            }
+        }
+    }
+
     fn follow_function(&mut self, func_name: &str) {
         if self.visited_functions.contains(func_name) {
             return;
@@ -238,14 +244,20 @@ impl<'a> TransitionVisitor<'a> {
 
         if let Some(mentions) = self.function_mentions.get(func_name) {
             for target in mentions {
-                // target is like "FsmName::State"
-                if target.starts_with(&format!("{}::", self.fsm_name)) || target.starts_with("Self::") {
+                if target.starts_with(&format!("{}::", self.fsm_name))
+                    || target.starts_with("Self::")
+                {
                     let state_name = target.split("::").last().unwrap_or(target).to_string();
                     if state_name != self.fsm_name && state_name != "Self" {
                         self.transitions.push(TransitionInfo {
                             source: self.source_state.clone(),
                             target: state_name,
-                            label: self.current_label.clone().unwrap_or_else(|| format!("(via {})", func_name)).trim().to_string(),
+                            label: self
+                                .current_label
+                                .clone()
+                                .unwrap_or_else(|| format!("(via {})", func_name))
+                                .trim()
+                                .to_string(),
                         });
                     }
                 }
@@ -253,18 +265,16 @@ impl<'a> TransitionVisitor<'a> {
         }
     }
 
-    fn extract_target_state(&mut self, expr: &Expr) -> Option<String> {
-        let s = quote!(#expr).to_string().replace(" ", "");
-        // Clean up target: remove generic params, field initializers, etc.
+    fn extract_target_state(&mut self, node: &SyntaxNode) -> Option<String> {
+        let s = node.text().to_string().replace(" ", "");
         let s = s.split('(').next()?.split('{').next()?.trim().to_string();
-        
+
         let target = if s.contains("::") {
             let parts: Vec<&str> = s.split("::").collect();
             if parts.len() >= 2 {
                 if parts[0] == self.fsm_name || parts[0] == "Self" {
                     parts.last().unwrap_or(&"").to_string()
                 } else {
-                    // It's likely SomeOtherFsm::State
                     parts.last().unwrap_or(&"").to_string()
                 }
             } else {
@@ -273,7 +283,7 @@ impl<'a> TransitionVisitor<'a> {
         } else {
             s
         };
-        
+
         if target == self.fsm_name || target == "Self" || target.is_empty() {
             None
         } else {
@@ -282,63 +292,278 @@ impl<'a> TransitionVisitor<'a> {
     }
 }
 
-pub fn clean_tokens(s: String) -> String {
-    s.replace('\n', " ")
-     .replace('\r', " ")
-     .split_whitespace()
-     .collect::<Vec<_>>()
-     .join(" ")
-     .replace(" : ", ":")
-     .replace(" :: ", "::")
-}
-
-pub struct SubFsmVisitor {
+pub struct SubFsmExtractor {
     pub fsm_name: String,
     pub discovered: HashSet<String>,
     pub context_fields: HashSet<String>,
 }
 
-impl<'ast> Visit<'ast> for SubFsmVisitor {
-    fn visit_path(&mut self, path: &'ast syn::Path) {
-        if path.segments.len() >= 2 {
-            if let Some(first) = path.segments.first() {
-                let first_str = first.ident.to_string();
-                
-                if let Some(first_char) = first_str.chars().next() {
-                    if first_char.is_uppercase() {
-                        if first_str != "Self" && first_str != self.fsm_name && first_str != "Transition" && first_str != "Option" && first_str != "Result" && first_str != "String" {
-                            
-                            let is_event = first_str.ends_with("Event") || first_str.ends_with("Evt");
-                            let is_context = first_str.ends_with("Context") || first_str.ends_with("Ctx");
-                            let is_state = first_str.ends_with("State");
-                            
-                            if !is_event && !is_context && !is_state {
-                                let is_camel_case = first_str.chars().any(|c| c.is_lowercase());
-                                let is_fsm = first_str.ends_with("FSM") || first_str.ends_with("Fsm");
-                                
-                                if is_camel_case || is_fsm {
-                                    self.discovered.insert(first_str);
+impl SubFsmExtractor {
+    pub fn new(fsm_name: String) -> Self {
+        Self {
+            fsm_name,
+            discovered: HashSet::new(),
+            context_fields: HashSet::new(),
+        }
+    }
+
+    pub fn extract(&mut self, node: &SyntaxNode) {
+        for child in node.descendants() {
+            match_ast! {
+                match child {
+                    ast::Path(path) => {
+                        let path_str = path.syntax().text().to_string().replace(" ", "");
+                        let segments: Vec<&str> = path_str.split("::").collect();
+                        if segments.len() >= 2 {
+                            let first_str = segments[0];
+                            if let Some(first_char) = first_str.chars().next() {
+                                if first_char.is_uppercase() {
+                                    if first_str != "Self"
+                                        && first_str != self.fsm_name
+                                        && first_str != "Transition"
+                                        && first_str != "Option"
+                                        && first_str != "Result"
+                                        && first_str != "String"
+                                    {
+                                        let is_event = first_str.ends_with("Event") || first_str.ends_with("Evt");
+                                        let is_context = first_str.ends_with("Context") || first_str.ends_with("Ctx");
+                                        let is_state = first_str.ends_with("State");
+
+                                        if !is_event && !is_context && !is_state {
+                                            let is_camel_case = first_str.chars().any(|c| c.is_lowercase());
+                                            let is_fsm = first_str.ends_with("FSM") || first_str.ends_with("Fsm");
+
+                                            if is_camel_case || is_fsm {
+                                                self.discovered.insert(first_str.to_string());
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }
-                    }
+                    },
+                    ast::FieldExpr(it) => {
+                        if let Some(name) = it.name_ref() {
+                            self.context_fields.insert(name.text().to_string());
+                        }
+                    },
+                    _ => {}
                 }
             }
         }
-        visit::visit_path(self, path);
-    }
-
-    fn visit_expr_field(&mut self, i: &'ast syn::ExprField) {
-        if let syn::Member::Named(ref ident) = i.member {
-            self.context_fields.insert(ident.to_string());
-        }
-        visit::visit_expr_field(self, i);
     }
 }
 
-/// Generates a Mermaid.js string for a single FSM (no nesting).
+pub fn parse_macro_body(token_tree: ast::TokenTree) -> Option<FsmDefinition> {
+    let mut name = None;
+    let mut context_type = None;
+    let mut states = Vec::new();
+
+    let tokens: Vec<SyntaxToken> = token_tree
+        .syntax()
+        .descendants_with_tokens()
+        .filter_map(|it| it.into_token())
+        .filter(|t| t.kind() != SyntaxKind::WHITESPACE && t.kind() != SyntaxKind::COMMENT)
+        .collect();
+
+    let mut i = 0;
+    if i < tokens.len() && tokens[i].kind() == T!['{'] {
+        i += 1;
+    }
+
+    while i < tokens.len() && tokens[i].kind() != T!['}'] {
+        let token = &tokens[i];
+        let text = token.text();
+
+        if text == "Name" {
+            i += 1;
+            if i < tokens.len() && tokens[i].kind() == T![:] {
+                i += 1;
+                if i < tokens.len() {
+                    name = Some(tokens[i].text().to_string());
+                    i += 1;
+                }
+            }
+        } else if text == "Context" {
+            i += 1;
+            if i < tokens.len() && tokens[i].kind() == T![:] {
+                i += 1;
+                let mut ty = String::new();
+                while i < tokens.len()
+                    && tokens[i].kind() != T![,]
+                    && tokens[i].text() != "Event"
+                    && tokens[i].text() != "States"
+                {
+                    ty.push_str(tokens[i].text());
+                    i += 1;
+                }
+                context_type = Some(ty);
+            }
+        } else if text == "States" {
+            i += 1;
+            if i < tokens.len() && tokens[i].kind() == T![:] {
+                i += 1;
+                if i < tokens.len() && tokens[i].kind() == T!['{'] {
+                    i += 1;
+                    while i < tokens.len() && tokens[i].kind() != T!['}'] {
+                        let state_name = tokens[i].text().to_string();
+                        i += 1;
+
+                        let mut fields = Vec::new();
+                        if i < tokens.len() && tokens[i].kind() == T!['{'] {
+                            i += 1;
+                            while i < tokens.len() && tokens[i].kind() != T!['}'] {
+                                let f_name = tokens[i].text().to_string();
+                                i += 1;
+                                if i < tokens.len() && tokens[i].kind() == T![:] {
+                                    i += 1;
+                                    let mut f_type = String::new();
+                                    while i < tokens.len()
+                                        && tokens[i].kind() != T![,]
+                                        && tokens[i].kind() != T!['}']
+                                    {
+                                        f_type.push_str(tokens[i].text());
+                                        i += 1;
+                                    }
+                                    fields.push((f_name, f_type));
+                                }
+                                if i < tokens.len() && tokens[i].kind() == T![,] {
+                                    i += 1;
+                                }
+                            }
+                            if i < tokens.len() && tokens[i].kind() == T!['}'] {
+                                i += 1;
+                            }
+                        }
+
+                        if i < tokens.len() && tokens[i].kind() == T![=>] {
+                            i += 1;
+                        } else if i + 1 < tokens.len()
+                            && tokens[i].kind() == T![=]
+                            && tokens[i + 1].kind() == T![>]
+                        {
+                            i += 2;
+                        }
+
+                        if i < tokens.len() && tokens[i].kind() == T!['{'] {
+                            let start = i;
+                            let mut depth = 0;
+                            while i < tokens.len() {
+                                if tokens[i].kind() == T!['{'] {
+                                    depth += 1;
+                                } else if tokens[i].kind() == T!['}'] {
+                                    depth -= 1;
+                                    if depth == 0 {
+                                        break;
+                                    }
+                                }
+                                i += 1;
+                            }
+                            let end = i;
+                            if i < tokens.len() {
+                                i += 1;
+                            }
+
+                            let mut entry_block = None;
+                            let mut process_block = None;
+                            let mut exit_block = None;
+
+                            let mut j = start + 1;
+                            while j < end {
+                                let key = tokens[j].text();
+                                if key == "entry" || key == "process" || key == "exit" {
+                                    let current_key = key.to_string();
+                                    j += 1;
+                                    if j < end && tokens[j].kind() == T![:] {
+                                        j += 1;
+                                        let mut block_text = String::new();
+                                        let mut inner_depth = 0;
+                                        let mut pipe_count = 0;
+                                        while j < end {
+                                            let tk = tokens[j].kind();
+                                            if tk == T!['{'] || tk == T!['('] || tk == T!['['] {
+                                                inner_depth += 1;
+                                            } else if tk == T!['}']
+                                                || tk == T![')']
+                                                || tk == T![']']
+                                            {
+                                                inner_depth -= 1;
+                                            } else if tk == T![|] {
+                                                pipe_count += 1;
+                                            } else if inner_depth == 0
+                                                && (pipe_count == 0 || pipe_count >= 2)
+                                            {
+                                                if tk == T![,] {
+                                                    break;
+                                                }
+                                                if j + 1 < end && tokens[j + 1].kind() == T![:] {
+                                                    let t = tokens[j].text();
+                                                    if t == "process" || t == "exit" || t == "entry"
+                                                    {
+                                                        break;
+                                                    }
+                                                }
+                                            }
+                                            block_text.push_str(tokens[j].text());
+                                            if j + 1 < end
+                                                && !tokens[j + 1].kind().is_punct()
+                                                && !tokens[j].kind().is_punct()
+                                            {
+                                                block_text.push(' ');
+                                            }
+                                            j += 1;
+                                        }
+                                        match current_key.as_str() {
+                                            "entry" => entry_block = Some(block_text),
+                                            "process" => process_block = Some(block_text),
+                                            "exit" => exit_block = Some(block_text),
+                                            _ => {}
+                                        }
+                                        if j < end && tokens[j].kind() == T![,] {
+                                            j += 1;
+                                        }
+                                        continue;
+                                    }
+                                }
+                                j += 1;
+                            }
+
+                            if let Some(pb) = process_block {
+                                states.push(StateDefinition {
+                                    name: state_name,
+                                    fields,
+                                    entry_block,
+                                    process_block: pb,
+                                    exit_block,
+                                });
+                            }
+                        }
+
+                        if i < tokens.len() && tokens[i].kind() == T![,] {
+                            i += 1;
+                        }
+                    }
+                    if i < tokens.len() && tokens[i].kind() == T!['}'] {
+                        i += 1;
+                    }
+                }
+            }
+        } else if tokens[i].kind() == T![,] {
+            i += 1;
+        } else {
+            i += 1;
+        }
+    }
+
+    Some(FsmDefinition {
+        name: name?,
+        context_type,
+        states,
+    })
+}
+
 pub fn generate_mermaid_simple(
-    fsm: &FsmDefinition, 
+    fsm: &FsmDefinition,
     include_guards: bool,
     function_mentions: &HashMap<String, HashSet<String>>,
 ) -> String {
@@ -347,92 +572,103 @@ pub fn generate_mermaid_simple(
     let mut all_edges = Vec::new();
 
     for state in &fsm.states {
-        let state_name = state.name.to_string();
-        let node_builder = StateNodeBuilder::default()
-            .label(&state_name).unwrap();
+        let state_name = state.name.clone();
+        let node_builder = StateNodeBuilder::default().label(&state_name).unwrap();
         let node = builder.node(node_builder).unwrap();
         nodes.insert(state_name.clone(), node);
 
-        let mut visitor = TransitionVisitor::new(fsm.name.to_string(), state_name, include_guards, function_mentions);
-        visitor.visit_expr(&state.process_block);
-        
-        for trans in visitor.transitions {
+        let mut extractor = TransitionExtractor::new(
+            fsm.name.clone(),
+            state_name,
+            include_guards,
+            function_mentions,
+        );
+        let parse = SourceFile::parse(&state.process_block, Edition::Edition2021);
+        extractor.extract(&parse.tree().syntax());
+
+        for trans in extractor.transitions {
             all_edges.push(trans);
         }
     }
 
     for trans in all_edges {
         if let (Some(src), Some(dst)) = (nodes.get(&trans.source), nodes.get(&trans.target)) {
-            let label = if trans.label.is_empty() { "*" } else { &trans.label };
-            builder.edge(
-                StateEdgeBuilder::default()
-                    .source(src.clone()).unwrap()
-                    .destination(dst.clone()).unwrap()
-                    .label(label).unwrap()
-            ).unwrap();
+            let label = if trans.label.is_empty() {
+                "*".to_string()
+            } else {
+                trans.label.replace(":", "#colon;")
+            };
+            builder
+                .edge(
+                    StateEdgeBuilder::default()
+                        .source(src.clone())
+                        .unwrap()
+                        .destination(dst.clone())
+                        .unwrap()
+                        .label(&label)
+                        .unwrap(),
+                )
+                .unwrap();
         }
     }
 
-    StateDiagram::from(builder).to_string()
+    StateDiagram::from(builder)
+        .to_string()
+        .replace("\r\n", "\n")
 }
 
-/// Generates a hierarchical Mermaid diagram, inlining sub-FSMs from the provided map.
-pub fn generate_mermaid_hierarchical(
-    fsm: &FsmDefinition, 
-    all_fsms: &HashMap<String, &FsmDefinition>,
-    context_struct_map: &HashMap<String, HashMap<String, String>>,
-    include_guards: bool,
-    function_mentions: &HashMap<String, HashSet<String>>,
-) -> String {
-    let builder = populate_builder_hierarchical(fsm, all_fsms, context_struct_map, include_guards, function_mentions);
-    StateDiagram::from(builder).to_string()
-}
-
-fn populate_builder_hierarchical(
+fn populate_builder_hierarchical<F>(
     fsm: &FsmDefinition,
     all_fsms: &HashMap<String, &FsmDefinition>,
     context_struct_map: &HashMap<String, HashMap<String, String>>,
     include_guards: bool,
     function_mentions: &HashMap<String, HashSet<String>>,
-) -> StateDiagramBuilder {
+    resolve_type: F,
+) -> StateDiagramBuilder
+where
+    F: Fn(&str) -> String + Copy,
+{
     let mut builder = StateDiagramBuilder::default();
     let mut nodes = HashMap::new();
     let mut all_edges = Vec::new();
 
-    // Get the context fields for this FSM
     let context_fields = if let Some(ctx_type) = &fsm.context_type {
-        let ctx_name = quote!(#ctx_type).to_string().replace(" ", "");
+        let ctx_name = resolve_type(&ctx_type.replace(" ", ""));
         context_struct_map.get(&ctx_name)
     } else {
         None
     };
 
     for state in &fsm.states {
-        let state_name = state.name.to_string();
-        let mut node_builder = StateNodeBuilder::default()
-            .label(&state_name).unwrap();
+        let state_name = state.name.clone();
+        let mut node_builder = StateNodeBuilder::default().label(&state_name).unwrap();
 
-        // Discover sub-FSMs for this state
-        let mut subfsm_visitor = SubFsmVisitor {
-            fsm_name: fsm.name.to_string(),
-            discovered: HashSet::new(),
-            context_fields: HashSet::new(),
-        };
-        if let Some(entry) = &state.entry_block { subfsm_visitor.visit_expr(entry); }
-        subfsm_visitor.visit_expr(&state.process_block);
-        if let Some(exit) = &state.exit_block { subfsm_visitor.visit_expr(exit); }
-        for (_, f_type) in &state.fields { subfsm_visitor.visit_type(f_type); }
+        let mut subfsm_extractor = SubFsmExtractor::new(fsm.name.clone());
+        if let Some(entry) = &state.entry_block {
+            let parse = SourceFile::parse(entry, Edition::Edition2021);
+            subfsm_extractor.extract(&parse.tree().syntax());
+        }
+        let parse = SourceFile::parse(&state.process_block, Edition::Edition2021);
+        subfsm_extractor.extract(&parse.tree().syntax());
+        if let Some(exit) = &state.exit_block {
+            let parse = SourceFile::parse(exit, Edition::Edition2021);
+            subfsm_extractor.extract(&parse.tree().syntax());
+        }
+        for (_, f_type) in &state.fields {
+            let parse = SourceFile::parse(f_type, Edition::Edition2021);
+            subfsm_extractor.extract(&parse.tree().syntax());
+        }
 
-        // 1. Explicit discovery (types mentioned in state fields or directly)
-        let mut all_discovered = subfsm_visitor.discovered;
+        let mut all_discovered = HashSet::new();
+        for child in subfsm_extractor.discovered {
+            all_discovered.insert(resolve_type(&child));
+        }
 
-        // 2. Contextual discovery (fields accessed in this state that are FSMs)
         if let Some(fields) = context_fields {
-            for field_name in subfsm_visitor.context_fields {
+            for field_name in subfsm_extractor.context_fields {
                 if let Some(type_name) = fields.get(&field_name) {
-                    // Heuristic: type_name might be wake_gate_rs::WakeGate, 
-                    // we want the last part if it matches an FSM name.
-                    let base_type = type_name.split("::").last().unwrap_or(type_name);
+                    let resolved_type = resolve_type(type_name);
+                    let base_type = resolved_type.split("::").last().unwrap_or(&resolved_type);
                     if all_fsms.contains_key(base_type) {
                         all_discovered.insert(base_type.to_string());
                     }
@@ -442,33 +678,104 @@ fn populate_builder_hierarchical(
 
         for sub_name in all_discovered {
             if let Some(sub_fsm) = all_fsms.get(&sub_name) {
-                let sub_builder = populate_builder_hierarchical(sub_fsm, all_fsms, context_struct_map, include_guards, function_mentions);
-                node_builder = node_builder.inner_diagram(StateDiagram::from(sub_builder)).unwrap();
+                let sub_builder = populate_builder_hierarchical(
+                    sub_fsm,
+                    all_fsms,
+                    context_struct_map,
+                    include_guards,
+                    function_mentions,
+                    resolve_type,
+                );
+                node_builder = node_builder
+                    .inner_diagram(StateDiagram::from(sub_builder))
+                    .unwrap();
             }
         }
 
         let node = builder.node(node_builder).unwrap();
         nodes.insert(state_name.clone(), node);
 
-        let mut trans_visitor = TransitionVisitor::new(fsm.name.to_string(), state_name, include_guards, function_mentions);
-        trans_visitor.visit_expr(&state.process_block);
-        
-        for trans in trans_visitor.transitions {
+        let mut trans_extractor = TransitionExtractor::new(
+            fsm.name.clone(),
+            state_name,
+            include_guards,
+            function_mentions,
+        );
+        let parse = SourceFile::parse(&state.process_block, Edition::Edition2021);
+        trans_extractor.extract(&parse.tree().syntax());
+
+        for trans in trans_extractor.transitions {
             all_edges.push(trans);
         }
     }
 
     for trans in all_edges {
         if let (Some(src), Some(dst)) = (nodes.get(&trans.source), nodes.get(&trans.target)) {
-            let label = if trans.label.is_empty() { "*" } else { &trans.label };
-            builder.edge(
-                StateEdgeBuilder::default()
-                    .source(src.clone()).unwrap()
-                    .destination(dst.clone()).unwrap()
-                    .label(label).unwrap()
-            ).unwrap();
+            let label = if trans.label.is_empty() {
+                "*".to_string()
+            } else {
+                trans.label.replace(":", "#colon;")
+            };
+            builder
+                .edge(
+                    StateEdgeBuilder::default()
+                        .source(src.clone())
+                        .unwrap()
+                        .destination(dst.clone())
+                        .unwrap()
+                        .label(&label)
+                        .unwrap(),
+                )
+                .unwrap();
         }
     }
 
     builder
+}
+
+pub fn generate_mermaid_hierarchical<F>(
+    fsm: &FsmDefinition,
+    all_fsms: &HashMap<String, &FsmDefinition>,
+    context_struct_map: &HashMap<String, HashMap<String, String>>,
+    include_guards: bool,
+    function_mentions: &HashMap<String, HashSet<String>>,
+    resolve_type: F,
+) -> String
+where
+    F: Fn(&str) -> String + Copy,
+{
+    let builder = populate_builder_hierarchical(
+        fsm,
+        all_fsms,
+        context_struct_map,
+        include_guards,
+        function_mentions,
+        resolve_type,
+    );
+    StateDiagram::from(builder)
+        .to_string()
+        .replace("\r\n", "\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_clean_tokens() {
+        let input = "ctx . timer . is_expired ( )".to_string();
+        assert_eq!(clean_tokens(input), "ctx.timer.is_expired()");
+
+        let input = "ButtonEvent :: Press".to_string();
+        assert_eq!(clean_tokens(input), "ButtonEvent::Press");
+
+        let input = "if ! ctx . is_active ( )".to_string();
+        assert_eq!(clean_tokens(input), "if !ctx.is_active()");
+
+        let input = "ctx.tick_count>=3".to_string();
+        assert_eq!(clean_tokens(input), "ctx.tick_count >= 3");
+        
+        let input = "a && b || c".to_string();
+        assert_eq!(clean_tokens(input), "a and b or c");
+    }
 }
