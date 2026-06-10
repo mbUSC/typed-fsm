@@ -133,15 +133,17 @@ pub struct TransitionInfo {
     pub label: String,
 }
 
-pub struct TransitionVisitor {
+pub struct TransitionVisitor<'a> {
     pub fsm_name: String,
     pub source_state: String,
     pub current_label: Option<String>,
     pub transitions: Vec<TransitionInfo>,
     pub include_guards: bool,
+    pub function_mentions: &'a HashMap<String, HashSet<String>>,
+    pub visited_functions: HashSet<String>,
 }
 
-impl<'ast> Visit<'ast> for TransitionVisitor {
+impl<'ast, 'a> Visit<'ast> for TransitionVisitor<'a> {
     fn visit_arm(&mut self, i: &'ast Arm) {
         let pat = &i.pat;
         let mut label = clean_tokens(quote!(#pat).to_string());
@@ -199,20 +201,55 @@ impl<'ast> Visit<'ast> for TransitionVisitor {
                         });
                     }
                 }
+            } else {
+                // Heuristic: this might be a helper function call
+                let func_name = path_str.split("::").last().unwrap_or(&path_str).to_string();
+                self.follow_function(&func_name);
             }
         }
         visit::visit_expr_call(self, i);
     }
+
+    fn visit_expr_method_call(&mut self, i: &'ast syn::ExprMethodCall) {
+        let method_name = i.method.to_string();
+        self.follow_function(&method_name);
+        visit::visit_expr_method_call(self, i);
+    }
 }
 
-impl TransitionVisitor {
-    pub fn new(fsm_name: String, source_state: String, include_guards: bool) -> Self {
+impl<'a> TransitionVisitor<'a> {
+    pub fn new(fsm_name: String, source_state: String, include_guards: bool, function_mentions: &'a HashMap<String, HashSet<String>>) -> Self {
         Self {
             fsm_name,
             source_state,
             current_label: None,
             transitions: Vec::new(),
             include_guards,
+            function_mentions,
+            visited_functions: HashSet::new(),
+        }
+    }
+
+    fn follow_function(&mut self, func_name: &str) {
+        if self.visited_functions.contains(func_name) {
+            return;
+        }
+        self.visited_functions.insert(func_name.to_string());
+
+        if let Some(mentions) = self.function_mentions.get(func_name) {
+            for target in mentions {
+                // target is like "FsmName::State"
+                if target.starts_with(&format!("{}::", self.fsm_name)) || target.starts_with("Self::") {
+                    let state_name = target.split("::").last().unwrap_or(target).to_string();
+                    if state_name != self.fsm_name && state_name != "Self" {
+                        self.transitions.push(TransitionInfo {
+                            source: self.source_state.clone(),
+                            target: state_name,
+                            label: self.current_label.clone().unwrap_or_else(|| format!("(via {})", func_name)).trim().to_string(),
+                        });
+                    }
+                }
+            }
         }
     }
 
@@ -300,7 +337,11 @@ impl<'ast> Visit<'ast> for SubFsmVisitor {
 }
 
 /// Generates a Mermaid.js string for a single FSM (no nesting).
-pub fn generate_mermaid_simple(fsm: &FsmDefinition, include_guards: bool) -> String {
+pub fn generate_mermaid_simple(
+    fsm: &FsmDefinition, 
+    include_guards: bool,
+    function_mentions: &HashMap<String, HashSet<String>>,
+) -> String {
     let mut builder = StateDiagramBuilder::default();
     let mut nodes = HashMap::new();
     let mut all_edges = Vec::new();
@@ -312,7 +353,7 @@ pub fn generate_mermaid_simple(fsm: &FsmDefinition, include_guards: bool) -> Str
         let node = builder.node(node_builder).unwrap();
         nodes.insert(state_name.clone(), node);
 
-        let mut visitor = TransitionVisitor::new(fsm.name.to_string(), state_name, include_guards);
+        let mut visitor = TransitionVisitor::new(fsm.name.to_string(), state_name, include_guards, function_mentions);
         visitor.visit_expr(&state.process_block);
         
         for trans in visitor.transitions {
@@ -341,8 +382,9 @@ pub fn generate_mermaid_hierarchical(
     all_fsms: &HashMap<String, &FsmDefinition>,
     context_struct_map: &HashMap<String, HashMap<String, String>>,
     include_guards: bool,
+    function_mentions: &HashMap<String, HashSet<String>>,
 ) -> String {
-    let builder = populate_builder_hierarchical(fsm, all_fsms, context_struct_map, include_guards);
+    let builder = populate_builder_hierarchical(fsm, all_fsms, context_struct_map, include_guards, function_mentions);
     StateDiagram::from(builder).to_string()
 }
 
@@ -351,6 +393,7 @@ fn populate_builder_hierarchical(
     all_fsms: &HashMap<String, &FsmDefinition>,
     context_struct_map: &HashMap<String, HashMap<String, String>>,
     include_guards: bool,
+    function_mentions: &HashMap<String, HashSet<String>>,
 ) -> StateDiagramBuilder {
     let mut builder = StateDiagramBuilder::default();
     let mut nodes = HashMap::new();
@@ -399,7 +442,7 @@ fn populate_builder_hierarchical(
 
         for sub_name in all_discovered {
             if let Some(sub_fsm) = all_fsms.get(&sub_name) {
-                let sub_builder = populate_builder_hierarchical(sub_fsm, all_fsms, context_struct_map, include_guards);
+                let sub_builder = populate_builder_hierarchical(sub_fsm, all_fsms, context_struct_map, include_guards, function_mentions);
                 node_builder = node_builder.inner_diagram(StateDiagram::from(sub_builder)).unwrap();
             }
         }
@@ -407,7 +450,7 @@ fn populate_builder_hierarchical(
         let node = builder.node(node_builder).unwrap();
         nodes.insert(state_name.clone(), node);
 
-        let mut trans_visitor = TransitionVisitor::new(fsm.name.to_string(), state_name, include_guards);
+        let mut trans_visitor = TransitionVisitor::new(fsm.name.to_string(), state_name, include_guards, function_mentions);
         trans_visitor.visit_expr(&state.process_block);
         
         for trans in trans_visitor.transitions {

@@ -88,6 +88,7 @@ fn default_breakdown() -> BreakdownMode { BreakdownMode::Flat }
 struct WorkspaceFinder {
     found_fsms: Vec<FsmDefinition>,
     found_structs: HashMap<String, HashMap<String, String>>,
+    found_functions: HashMap<String, HashSet<String>>,
 }
 
 impl<'ast> Visit<'ast> for WorkspaceFinder {
@@ -115,6 +116,39 @@ impl<'ast> Visit<'ast> for WorkspaceFinder {
         }
         self.found_structs.insert(struct_name, fields);
         visit::visit_item_struct(self, i);
+    }
+
+    fn visit_item_fn(&mut self, i: &'ast syn::ItemFn) {
+        let func_name = i.sig.ident.to_string();
+        let mut mentions = HashSet::new();
+        let mut visitor = MentionVisitor { mentions: &mut mentions };
+        visitor.visit_block(&i.block);
+        self.found_functions.insert(func_name, mentions);
+        visit::visit_item_fn(self, i);
+    }
+
+    fn visit_impl_item_fn(&mut self, i: &'ast syn::ImplItemFn) {
+        let func_name = i.sig.ident.to_string();
+        let mut mentions = HashSet::new();
+        let mut visitor = MentionVisitor { mentions: &mut mentions };
+        visitor.visit_block(&i.block);
+        self.found_functions.insert(func_name, mentions);
+        visit::visit_impl_item_fn(self, i);
+    }
+}
+
+struct MentionVisitor<'a> {
+    mentions: &'a mut HashSet<String>,
+}
+
+impl<'ast, 'a> Visit<'ast> for MentionVisitor<'a> {
+    fn visit_path(&mut self, i: &'ast syn::Path) {
+        if i.segments.len() >= 2 {
+            // Check for StateMachine::State or Self::State
+            let path_str = quote!(#i).to_string().replace(" ", "");
+            self.mentions.insert(path_str);
+        }
+        visit::visit_path(self, i);
     }
 }
 
@@ -147,7 +181,11 @@ fn main() -> anyhow::Result<()> {
     }
 
     println!("Scanning {} for state_machine! macros and context structs...", src_input);
-    let mut finder = WorkspaceFinder { found_fsms: vec![], found_structs: HashMap::new() };
+    let mut finder = WorkspaceFinder { 
+        found_fsms: vec![], 
+        found_structs: HashMap::new(),
+        found_functions: HashMap::new(),
+    };
 
     if src_path.is_file() {
         process_file(src_path, &mut finder)?;
@@ -171,7 +209,8 @@ fn main() -> anyhow::Result<()> {
     }
     fs::create_dir_all(&output_dir)?;
 
-    println!("Found {} FSM definitions and {} struct definitions.", finder.found_fsms.len(), finder.found_structs.len());
+    println!("Found {} FSM definitions, {} struct definitions, and {} functions.", 
+        finder.found_fsms.len(), finder.found_structs.len(), finder.found_functions.len());
     
     let fsm_map: HashMap<String, &FsmDefinition> = finder.found_fsms.iter().map(|f| (f.name.to_string(), f)).collect();
 
@@ -223,8 +262,8 @@ fn main() -> anyhow::Result<()> {
         fs::create_dir_all(&fsm_output_dir)?;
         
         let content = match config.mermaid.mode {
-            DiagramMode::Simple => generate_mermaid_simple(fsm, include_guards),
-            DiagramMode::Hierarchical => generate_mermaid_hierarchical(fsm, &fsm_map, &finder.found_structs, include_guards),
+            DiagramMode::Simple => generate_mermaid_simple(fsm, include_guards, &finder.found_functions),
+            DiagramMode::Hierarchical => generate_mermaid_hierarchical(fsm, &fsm_map, &finder.found_structs, include_guards, &finder.found_functions),
         };
         
         let path = fsm_output_dir.join(format!("{}.mermaid", name));
@@ -232,11 +271,11 @@ fn main() -> anyhow::Result<()> {
         println!("Generated root: {}", path.display());
 
         match config.mermaid.breakdown {
-            BreakdownMode::Flat => save_breakdown(fsm, &fsm_map, &finder.found_structs, &fsm_output_dir, "breakdown", false, include_guards)?,
-            BreakdownMode::Nested => save_breakdown(fsm, &fsm_map, &finder.found_structs, &fsm_output_dir, "breakdown", true, include_guards)?,
+            BreakdownMode::Flat => save_breakdown(fsm, &fsm_map, &finder.found_structs, &fsm_output_dir, "breakdown", false, include_guards, &finder.found_functions)?,
+            BreakdownMode::Nested => save_breakdown(fsm, &fsm_map, &finder.found_structs, &fsm_output_dir, "breakdown", true, include_guards, &finder.found_functions)?,
             BreakdownMode::Both => {
-                save_breakdown(fsm, &fsm_map, &finder.found_structs, &fsm_output_dir, "breakdown_flat", false, include_guards)?;
-                save_breakdown(fsm, &fsm_map, &finder.found_structs, &fsm_output_dir, "breakdown_nested", true, include_guards)?;
+                save_breakdown(fsm, &fsm_map, &finder.found_structs, &fsm_output_dir, "breakdown_flat", false, include_guards, &finder.found_functions)?;
+                save_breakdown(fsm, &fsm_map, &finder.found_structs, &fsm_output_dir, "breakdown_nested", true, include_guards, &finder.found_functions)?;
             },
             BreakdownMode::None => {},
         }
@@ -253,6 +292,7 @@ fn save_breakdown(
     sub_dir: &str, 
     nested: bool,
     include_guards: bool,
+    function_mentions: &HashMap<String, HashSet<String>>,
 ) -> anyhow::Result<()> {
     let mut discovered = HashSet::new();
     collect_all_subfsms(fsm, all_fsms, struct_map, &mut discovered);
@@ -267,9 +307,9 @@ fn save_breakdown(
     for sub_name in discovered {
         if let Some(sub_fsm) = all_fsms.get(&sub_name) {
             let content = if nested {
-                generate_mermaid_hierarchical(sub_fsm, all_fsms, struct_map, include_guards)
+                generate_mermaid_hierarchical(sub_fsm, all_fsms, struct_map, include_guards, function_mentions)
             } else {
-                generate_mermaid_simple(sub_fsm, include_guards)
+                generate_mermaid_simple(sub_fsm, include_guards, function_mentions)
             };
             let path = target_dir.join(format!("{}.mermaid", sub_name));
             fs::write(path, content)?;
