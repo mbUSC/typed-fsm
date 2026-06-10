@@ -66,7 +66,7 @@ impl Default for MermaidConfig {
     }
 }
 
-fn default_scan_dir() -> String { "scan".to_string() }
+fn default_scan_dir() -> String { "src".to_string() }
 fn default_output_dir() -> String { "target/docs/diagrams".to_string() }
 fn default_mode() -> DiagramMode { DiagramMode::Hierarchical }
 fn default_breakdown() -> BreakdownMode { BreakdownMode::Flat }
