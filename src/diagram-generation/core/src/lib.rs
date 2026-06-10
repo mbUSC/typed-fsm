@@ -1,6 +1,6 @@
 use mermaid_builder::prelude::*;
 use ra_ap_syntax::{
-    ast::{self, AstNode, HasArgList},
+    ast::{self, AstNode, HasArgList, HasGenericArgs},
     match_ast, Edition, SourceFile, SyntaxKind, SyntaxNode, SyntaxToken, T,
 };
 use std::collections::{HashMap, HashSet};
@@ -241,6 +241,128 @@ impl FunctionRegistry {
     }
 }
 
+/// Recursively check whether `ty` syntactically mentions a path segment named
+/// `Transition`. Walks through generic args (so `Result<Transition<Self>>`
+/// matches), references (`&Transition<Self>`), tuples, slices, and arrays.
+///
+/// Substring matching on the type text used to do this — but it fired on
+/// types like `MyTransition` too. This structural version only matches the
+/// exact segment name.
+fn type_mentions_transition(ty: &ast::Type) -> bool {
+    match ty {
+        ast::Type::PathType(p) => {
+            let Some(path) = p.path() else { return false };
+            for segment in path.segments() {
+                if segment
+                    .name_ref()
+                    .is_some_and(|n| n.text() == "Transition")
+                {
+                    return true;
+                }
+                if let Some(args) = segment.generic_arg_list() {
+                    for arg in args.generic_args() {
+                        if let ast::GenericArg::TypeArg(t) = arg {
+                            if let Some(inner) = t.ty() {
+                                if type_mentions_transition(&inner) {
+                                    return true;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            false
+        }
+        ast::Type::TupleType(t) => t.fields().any(|f| type_mentions_transition(&f)),
+        ast::Type::RefType(r) => r.ty().is_some_and(|t| type_mentions_transition(&t)),
+        ast::Type::ParenType(p) => p.ty().is_some_and(|t| type_mentions_transition(&t)),
+        ast::Type::ArrayType(a) => a.ty().is_some_and(|t| type_mentions_transition(&t)),
+        ast::Type::SliceType(s) => s.ty().is_some_and(|t| type_mentions_transition(&t)),
+        _ => false,
+    }
+}
+
+/// Produce a canonical, whitespace-free key for `ty`, suitable for use in
+/// alias / struct-field registries and the `resolve_type` chain.
+///
+/// `PathType` segments are joined with `::` and *generic arguments are
+/// stripped* — so `Vec<MyFsm>` becomes `Vec`, not `Vec<MyFsm>`. Downstream
+/// the consumer takes the last `::` segment as the base type name; keeping
+/// generics in the key would defeat that.
+///
+/// Reference wrappers are preserved (`&Foo` → `&Foo`) so aliases written
+/// with `&` semantics still match. For anything unusual the fallback is the
+/// raw whitespace-stripped source text.
+pub fn canonical_type_text(ty: &ast::Type) -> String {
+    match ty {
+        ast::Type::PathType(p) => {
+            if let Some(path) = p.path() {
+                let segments: Vec<String> = path
+                    .segments()
+                    .filter_map(|s| s.name_ref().map(|n| n.text().to_string()))
+                    .collect();
+                if !segments.is_empty() {
+                    return segments.join("::");
+                }
+            }
+            ty.syntax().text().to_string().replace(' ', "")
+        }
+        ast::Type::RefType(r) => {
+            let inner = r
+                .ty()
+                .map(|t| canonical_type_text(&t))
+                .unwrap_or_default();
+            format!("&{}", inner)
+        }
+        ast::Type::ParenType(p) => p
+            .ty()
+            .map(|t| canonical_type_text(&t))
+            .unwrap_or_default(),
+        _ => ty.syntax().text().to_string().replace(' ', ""),
+    }
+}
+
+/// Returns true if `call`'s callee is a path whose last two segments are
+/// `Transition::To` (allowing any prefix — `crate::Transition::To`,
+/// `mod::Transition::To`, plain `Transition::To` all match).
+fn is_transition_to_call(call: &ast::CallExpr) -> bool {
+    let Some(ast::Expr::PathExpr(p)) = call.expr() else {
+        return false;
+    };
+    let Some(path) = p.path() else { return false };
+    let segments: Vec<String> = path
+        .segments()
+        .filter_map(|s| s.name_ref().map(|n| n.text().to_string()))
+        .collect();
+    let n = segments.len();
+    n >= 2 && segments[n - 2] == "Transition" && segments[n - 1] == "To"
+}
+
+/// Pull the full canonical path text of a variant constructor argument
+/// (`Self::Idle`, `MyFsm::Running`, `Idle`). Returns the segments joined by
+/// `::`. Rejects non-variant-shaped expressions and any path whose last
+/// segment doesn't start with an uppercase letter (function calls, locals).
+fn target_path_from_arg_expr(arg: &ast::Expr) -> Option<String> {
+    let path = match arg {
+        ast::Expr::PathExpr(p) => p.path()?,
+        ast::Expr::CallExpr(c) => match c.expr()? {
+            ast::Expr::PathExpr(p) => p.path()?,
+            _ => return None,
+        },
+        ast::Expr::RecordExpr(r) => r.path()?,
+        _ => return None,
+    };
+    let segments: Vec<String> = path
+        .segments()
+        .filter_map(|s| s.name_ref().map(|n| n.text().to_string()))
+        .collect();
+    let last = segments.last()?;
+    if !last.chars().next().is_some_and(|c| c.is_uppercase()) {
+        return None;
+    }
+    Some(segments.join("::"))
+}
+
 /// Inspect a function AST node and extract whatever's relevant for transition
 /// follow-through: its name, whether it returns `Transition<...>`, and the
 /// `Transition::To(...)` targets in its body. Returns `None` if the function
@@ -252,32 +374,20 @@ pub fn analyze_function(func: &ast::Fn) -> Option<(String, FunctionInfo)> {
     let returns_transition = func
         .ret_type()
         .and_then(|rt| rt.ty())
-        .map(|ty| ty.syntax().text().to_string().contains("Transition"))
-        .unwrap_or(false);
+        .as_ref()
+        .is_some_and(type_mentions_transition);
 
     let mut transition_targets = HashSet::new();
     if let Some(body) = func.body() {
         for descendant in body.syntax().descendants() {
-            if let Some(call) = ast::CallExpr::cast(descendant) {
-                let Some(expr) = call.expr() else { continue };
-                let path_str = expr.syntax().text().to_string().replace(' ', "");
-                if !path_str.ends_with("Transition::To") {
-                    continue;
-                }
-                let Some(args) = call.arg_list() else { continue };
-                let Some(arg) = args.args().next() else { continue };
-                // Strip constructor data: `Self::Idle { x: 1 }` → `Self::Idle`.
-                let raw = arg.syntax().text().to_string().replace(' ', "");
-                let target = raw
-                    .split('(')
-                    .next()
-                    .and_then(|s| s.split('{').next())
-                    .unwrap_or("")
-                    .trim()
-                    .to_string();
-                if !target.is_empty() {
-                    transition_targets.insert(target);
-                }
+            let Some(call) = ast::CallExpr::cast(descendant) else { continue };
+            if !is_transition_to_call(&call) {
+                continue;
+            }
+            let Some(args) = call.arg_list() else { continue };
+            let Some(arg) = args.args().next() else { continue };
+            if let Some(target) = target_path_from_arg_expr(&arg) {
+                transition_targets.insert(target);
             }
         }
     }
@@ -383,22 +493,33 @@ impl<'a> TransitionExtractor<'a> {
                     self.current_label = saved;
                 },
                 ast::CallExpr(it) => {
-                    if let Some(expr) = it.expr() {
-                        let path_str = expr.syntax().text().to_string().replace(" ", "");
-                        if path_str.contains("Transition::To") {
-                            if let Some(arg_list) = it.arg_list() {
-                                if let Some(arg) = arg_list.args().next() {
-                                    if let Some(target) = self.extract_target_state(&arg.syntax()) {
-                                        self.transitions.push(TransitionInfo {
-                                            source: self.source_state.clone(),
-                                            target,
-                                            label: self.current_label.clone(),
-                                        });
-                                    }
+                    if is_transition_to_call(&it) {
+                        if let Some(arg_list) = it.arg_list() {
+                            if let Some(arg) = arg_list.args().next() {
+                                if let Some(target) =
+                                    self.extract_target_state(&arg.syntax())
+                                {
+                                    self.transitions.push(TransitionInfo {
+                                        source: self.source_state.clone(),
+                                        target,
+                                        label: self.current_label.clone(),
+                                    });
                                 }
                             }
-                        } else {
-                            let func_name = path_str.split("::").last().unwrap_or(&path_str).to_string();
+                        }
+                    } else if let Some(expr) = it.expr() {
+                        // Free-function call. The follow site re-resolves
+                        // via the registry — name only, intentionally.
+                        let func_name = expr
+                            .syntax()
+                            .text()
+                            .to_string()
+                            .replace(' ', "")
+                            .rsplit("::")
+                            .next()
+                            .unwrap_or("")
+                            .to_string();
+                        if !func_name.is_empty() {
                             self.follow_function(&func_name);
                         }
                     }
@@ -474,29 +595,45 @@ impl<'a> TransitionExtractor<'a> {
         }
     }
 
-    fn extract_target_state(&mut self, node: &SyntaxNode) -> Option<String> {
-        let s = node.text().to_string().replace(" ", "");
-        let s = s.split('(').next()?.split('{').next()?.trim().to_string();
-
-        let target = if s.contains("::") {
-            let parts: Vec<&str> = s.split("::").collect();
-            if parts.len() >= 2 {
-                if parts[0] == self.fsm_name || parts[0] == "Self" {
-                    parts.last().unwrap_or(&"").to_string()
-                } else {
-                    parts.last().unwrap_or(&"").to_string()
-                }
-            } else {
-                s
-            }
-        } else {
-            s
+    /// Pull a state name out of the argument expression in
+    /// `Transition::To(<arg>)`. Handles the three shapes a state variant can
+    /// take:
+    ///
+    /// - `Self::Idle`               → PathExpr
+    /// - `Self::Running(0)`         → CallExpr  (tuple variant constructor)
+    /// - `Self::Running { speed }`  → RecordExpr (struct variant constructor)
+    ///
+    /// Anything else (function calls like `helper()`, method calls like
+    /// `self.next()`, control-flow expressions) returns `None` — we don't
+    /// emit a phantom edge from a name we can't structurally identify as a
+    /// state variant.
+    fn extract_target_state(&self, node: &SyntaxNode) -> Option<String> {
+        let path = match ast::Expr::cast(node.clone())? {
+            ast::Expr::PathExpr(p) => p.path()?,
+            ast::Expr::CallExpr(c) => match c.expr()? {
+                // The callee of `Self::Running(x)` is the variant path
+                // `Self::Running`. A bare `helper()` would land here too,
+                // but its last segment starts lowercase and is rejected below.
+                ast::Expr::PathExpr(p) => p.path()?,
+                _ => return None,
+            },
+            ast::Expr::RecordExpr(r) => r.path()?,
+            _ => return None,
         };
 
-        if target == self.fsm_name || target == "Self" || target.is_empty() {
+        let last = path.segments().last()?.name_ref()?.text().to_string();
+
+        // Variant identifiers start uppercase by convention; calls/locals
+        // start lowercase. Filters out `Transition::To(make_idle())` and
+        // similar function-call-shaped arguments.
+        if !last.chars().next().is_some_and(|c| c.is_uppercase()) {
+            return None;
+        }
+
+        if last == self.fsm_name || last == "Self" {
             None
         } else {
-            Some(target)
+            Some(last)
         }
     }
 }
@@ -528,14 +665,17 @@ impl SubFsmExtractor {
                         // (`ends_with("Event")`, `"Fsm"`, etc.) in here causes
                         // false negatives for FSMs that happen to share those
                         // suffixes (e.g. an FSM literally named `OrderState`).
-                        let path_str = path.syntax().text().to_string().replace(" ", "");
-                        let segments: Vec<&str> = path_str.split("::").collect();
-                        if segments.len() >= 2 {
-                            let first_str = segments[0];
-                            if let Some(first_char) = first_str.chars().next() {
-                                if first_char.is_uppercase()
+                        //
+                        // Only multi-segment paths qualify: a bare `Idle` is
+                        // most often a variant pattern, not a type reference.
+                        let mut segments = path.segments();
+                        if let (Some(first), Some(_)) = (segments.next(), segments.next()) {
+                            if let Some(name_ref) = first.name_ref() {
+                                let first_str = name_ref.text();
+                                let first_char = first_str.chars().next();
+                                if first_char.is_some_and(|c| c.is_uppercase())
                                     && first_str != "Self"
-                                    && first_str != self.fsm_name
+                                    && first_str != self.fsm_name.as_str()
                                     && first_str != "Transition"
                                     && first_str != "Option"
                                     && first_str != "Result"
@@ -621,6 +761,80 @@ impl<'a> Cursor<'a> {
         }
         false
     }
+}
+
+/// Append `tokens[*j]` to `text` (with original spacing rules) and advance.
+fn push_and_advance(tokens: &[SyntaxToken], j: &mut usize, text: &mut String) {
+    text.push_str(tokens[*j].text());
+    if *j + 1 < tokens.len()
+        && !tokens[*j + 1].kind().is_punct()
+        && !tokens[*j].kind().is_punct()
+    {
+        text.push(' ');
+    }
+    *j += 1;
+}
+
+/// Parse a lifecycle value structurally as `|args| { body }`.
+///
+/// This is the structural replacement for the old pipe-counter hack. The FSM
+/// macro's lifecycle hooks (entry/process/exit) are always block-bodied
+/// closures, so the shape we expect is:
+///
+///   1. `|`                — opens args
+///   2. tokens until `|`   — the args (single closure has no nested `|`s)
+///   3. `|`                — closes args
+///   4. `{`                — opens block body
+///   5. balanced tokens    — body, possibly containing more `{}` and `|`s
+///   6. `}`                — closes block body
+///
+/// Returns `Some(text)` with the full captured closure text (including the
+/// outer `|args|{...}`) and advances `*j` past it. Returns `None` if the
+/// value isn't shaped as a block-body closure — in that case `*j` is left
+/// pointing at the offending token so the caller can recover.
+fn parse_closure_value(tokens: &[SyntaxToken], j: &mut usize, end: usize) -> Option<String> {
+    let mut text = String::new();
+
+    // 1. Opening `|`
+    if *j >= end || tokens[*j].kind() != T![|] {
+        return None;
+    }
+    push_and_advance(tokens, j, &mut text);
+
+    // 2-3. Skip arg tokens until the matching closing `|`. Real closure args
+    // never contain `|` (only commas/types/patterns), so this is unambiguous.
+    while *j < end && tokens[*j].kind() != T![|] {
+        push_and_advance(tokens, j, &mut text);
+    }
+    if *j >= end {
+        return None; // unterminated args
+    }
+    push_and_advance(tokens, j, &mut text); // closing `|`
+
+    // 4. Block body must open with `{`.
+    if *j >= end || tokens[*j].kind() != T!['{'] {
+        return None;
+    }
+
+    // 5-6. Walk a balanced `{...}` span. Tokens inside don't affect closure
+    // boundaries — `|`s are bitwise-or or match alternation, both fine.
+    let mut depth: i32 = 0;
+    while *j < end {
+        let kind = tokens[*j].kind();
+        if kind == T!['{'] {
+            depth += 1;
+        } else if kind == T!['}'] {
+            depth -= 1;
+            push_and_advance(tokens, j, &mut text);
+            if depth == 0 {
+                return Some(text);
+            }
+            continue;
+        }
+        push_and_advance(tokens, j, &mut text);
+    }
+    // EOF before balanced close.
+    None
 }
 
 pub fn parse_macro_body(token_tree: ast::TokenTree) -> Result<FsmDefinition, ParseError> {
@@ -727,71 +941,27 @@ pub fn parse_macro_body(token_tree: ast::TokenTree) -> Result<FsmDefinition, Par
                                 j += 1;
                                 if j < end && tokens[j].kind() == T![:] {
                                     j += 1;
-                                    let mut block_text = String::new();
-                                    let mut inner_depth = 0;
-                                    // Pipe-counter rationale:
-                                    //   Lifecycle values look like `|args| body`.
-                                    //   At depth 0, the first `|` opens the
-                                    //   closure args, the second closes them.
-                                    //   While `pipe_count == 1` we're inside the
-                                    //   arg list — depth-0 commas there separate
-                                    //   args, not block siblings, so we must NOT
-                                    //   break on them. Once pipe_count reaches 2
-                                    //   (closed), depth-0 commas terminate the
-                                    //   block. Pairs of `|`s inside braces don't
-                                    //   matter — inner_depth > 0 short-circuits
-                                    //   the break check entirely.
-                                    let mut pipe_count = 0u32;
-                                    while j < end {
-                                        let tk = tokens[j].kind();
-                                        if tk == T!['{'] || tk == T!['('] || tk == T!['['] {
-                                            inner_depth += 1;
-                                        } else if tk == T!['}']
-                                            || tk == T![')']
-                                            || tk == T![']']
-                                        {
-                                            inner_depth -= 1;
-                                        } else if tk == T![|] {
-                                            pipe_count += 1;
-                                        } else if inner_depth == 0
-                                            && (pipe_count == 0 || pipe_count >= 2)
-                                        {
-                                            if tk == T![,] {
-                                                break;
-                                            }
-                                            if j + 1 < end && tokens[j + 1].kind() == T![:] {
-                                                let t = tokens[j].text();
-                                                if t == "process" || t == "exit" || t == "entry"
-                                                {
-                                                    break;
-                                                }
-                                            }
-                                        }
-                                        block_text.push_str(tokens[j].text());
-                                        if j + 1 < end
-                                            && !tokens[j + 1].kind().is_punct()
-                                            && !tokens[j].kind().is_punct()
-                                        {
-                                            block_text.push(' ');
-                                        }
-                                        j += 1;
-                                        }
+                                    if let Some(block_text) =
+                                        parse_closure_value(&tokens, &mut j, end)
+                                    {
                                         match current_key.as_str() {
                                             "entry" => entry_block = Some(block_text),
                                             "process" => process_block = Some(block_text),
                                             "exit" => exit_block = Some(block_text),
                                             _ => {}
                                         }
-                                        if j < end && tokens[j].kind() == T![,] {
-                                            j += 1;
-                                        }
-                                        continue;
                                     }
+                                    if j < end && tokens[j].kind() == T![,] {
+                                        j += 1;
+                                    }
+                                    continue;
                                 }
                                 j += 1;
                             }
+                            j += 1;
+                        }
 
-                            if let Some(pb) = process_block {
+                        if let Some(pb) = process_block {
                                 states.push(StateDefinition {
                                     name: state_name,
                                     fields,
@@ -1304,6 +1474,92 @@ mod tests {
         );
     }
 
+    /// Parse a `let x: Ty = …;` and return the `Ty` AST node — handy for
+    /// canonical_type_text tests since `ast::Type` doesn't have a top-level
+    /// parser entry point.
+    fn parse_type(ty_src: &str) -> ast::Type {
+        let src = format!("fn _f() {{ let _x: {} = todo!(); }}", ty_src);
+        let parse = SourceFile::parse(&src, Edition::Edition2021);
+        parse
+            .tree()
+            .syntax()
+            .descendants()
+            .find_map(ast::LetStmt::cast)
+            .and_then(|s| s.ty())
+            .expect("test fixture must declare a typed local")
+    }
+
+    #[test]
+    fn canonical_type_text_strips_generics() {
+        // Generics on the path segment are dropped — what we want as a
+        // registry key is the *base* type, since downstream takes the last
+        // `::` segment.
+        assert_eq!(canonical_type_text(&parse_type("Vec<MyFsm>")), "Vec");
+        assert_eq!(
+            canonical_type_text(&parse_type("Result<Transition<Self>, Err>")),
+            "Result",
+        );
+    }
+
+    #[test]
+    fn canonical_type_text_preserves_path_segments() {
+        assert_eq!(canonical_type_text(&parse_type("Foo::Bar::Baz")), "Foo::Bar::Baz");
+        assert_eq!(canonical_type_text(&parse_type("MyFsm")), "MyFsm");
+    }
+
+    #[test]
+    fn canonical_type_text_preserves_reference_marker() {
+        // Refs aren't dereferenced — the marker has to survive so an alias
+        // written `type Foo = &MyFsm;` still keys the same way.
+        assert_eq!(canonical_type_text(&parse_type("&MyFsm")), "&MyFsm");
+    }
+
+    #[test]
+    fn canonical_type_text_unwraps_parentheses() {
+        assert_eq!(canonical_type_text(&parse_type("(MyFsm)")), "MyFsm");
+    }
+
+    #[test]
+    fn analyze_function_does_not_match_substring_named_types() {
+        // The old substring check fired on `MyTransition` too — fixed by
+        // segment-name matching.
+        let src = r#"
+            fn helper(ctx: &Ctx) -> MyTransition { todo!() }
+        "#;
+        let f = parse_first_fn(src);
+        let (_, info) = analyze_function(&f).expect("should analyze");
+        assert!(
+            !info.returns_transition,
+            "MyTransition should not be classified as Transition",
+        );
+    }
+
+    #[test]
+    fn analyze_function_finds_transition_inside_generic_args() {
+        // `Result<Transition<Self>, Err>` — the outer type isn't Transition
+        // but its generic arg is.
+        let src = r#"
+            fn try_step() -> Result<Transition<Self>, MyErr> { todo!() }
+        "#;
+        let f = parse_first_fn(src);
+        let (_, info) = analyze_function(&f).expect("should analyze");
+        assert!(info.returns_transition);
+    }
+
+    #[test]
+    fn analyze_function_records_full_target_path() {
+        // The follow site checks the prefix (Self::… vs OtherFsm::…), so the
+        // recorded target must keep that prefix — not just the last segment.
+        let src = r#"
+            fn handle(ctx: &Ctx) -> Transition<MyFsm> {
+                Transition::To(MyFsm::Running { speed: 0 })
+            }
+        "#;
+        let f = parse_first_fn(src);
+        let (_, info) = analyze_function(&f).expect("should analyze");
+        assert!(info.transition_targets.contains(&"MyFsm::Running".to_string()));
+    }
+
     #[test]
     fn analyze_function_skips_helpers_not_returning_transition() {
         let src = r#"
@@ -1416,6 +1672,113 @@ mod tests {
         assert!(loaded.entry_block.is_some());
         assert!(loaded.exit_block.is_some());
         assert_eq!(fsm.states[1].name, "Empty");
+    }
+
+    /// Build a TransitionExtractor and feed it a `process` body fragment.
+    /// Returns the list of (target_state, label_events) pairs it produced.
+    fn extract_transitions(
+        fsm_name: &str,
+        source_state: &str,
+        body: &str,
+    ) -> Vec<(String, Vec<String>)> {
+        let registry = FunctionRegistry::new();
+        let mut ex =
+            TransitionExtractor::new(fsm_name.to_string(), source_state.to_string(), true, &registry);
+        let parse = SourceFile::parse(body, Edition::Edition2021);
+        ex.extract(&parse.tree().syntax());
+        ex.transitions
+            .into_iter()
+            .map(|t| (t.target, t.label.events))
+            .collect()
+    }
+
+    #[test]
+    fn extract_target_state_handles_all_three_variant_shapes() {
+        // Path: Self::A, Call: Self::B(0), Record: Self::C { x: 0 }
+        let body = r#"
+            fn _f() {
+                Transition::To(Self::A);
+                Transition::To(Self::B(0));
+                Transition::To(Self::C { x: 0 });
+            }
+        "#;
+        let mut targets: Vec<String> =
+            extract_transitions("Fsm", "Start", body).into_iter().map(|(t, _)| t).collect();
+        targets.sort();
+        assert_eq!(targets, vec!["A".to_string(), "B".to_string(), "C".to_string()]);
+    }
+
+    #[test]
+    fn extract_target_state_rejects_function_call_arguments() {
+        // `Transition::To(make_idle())` — `make_idle` starts lowercase so the
+        // structural check correctly refuses to emit "make_idle" as a state.
+        // (The function-following pass handles indirect transitions instead.)
+        let body = r#"
+            fn _f() {
+                Transition::To(make_idle());
+            }
+        "#;
+        let targets = extract_transitions("Fsm", "Start", body);
+        assert!(
+            targets.is_empty(),
+            "expected no direct target from a function-call arg, got {:?}",
+            targets,
+        );
+    }
+
+    #[test]
+    fn extract_target_state_rejects_method_call_argument() {
+        // `Transition::To(self.next())` — MethodCallExpr isn't a variant
+        // constructor; emit nothing rather than guessing.
+        let body = r#"
+            fn _f() {
+                Transition::To(self.next());
+            }
+        "#;
+        let targets = extract_transitions("Fsm", "Start", body);
+        assert!(targets.is_empty(), "method-call arg should not become a target");
+    }
+
+    #[test]
+    fn parse_macro_body_handles_no_arg_closure() {
+        // `|| { body }` — empty args. The pipe-counter version could mis-count
+        // these because the two `|`s are adjacent.
+        let src = r#"
+            state_machine! {
+                Name: NoArgs,
+                States: {
+                    Only => {
+                        entry: || { let _z = 0; },
+                        process: |_c, _e| { Transition::None }
+                    }
+                }
+            }
+        "#;
+        let fsm = parse_for_test(src).expect("no-arg closure should parse");
+        assert!(fsm.states[0].entry_block.is_some());
+    }
+
+    #[test]
+    fn parse_macro_body_handles_bitwise_or_in_closure_body() {
+        // `flags | OTHER_FLAG` inside the body must not affect closure
+        // boundaries — the body is inside `{...}` so depth tracking covers it.
+        let src = r#"
+            state_machine! {
+                Name: BitOr,
+                States: {
+                    Active => {
+                        process: |ctx, _evt| {
+                            let _mask = ctx.flags | 0b1010;
+                            Transition::None
+                        }
+                    }
+                }
+            }
+        "#;
+        let fsm = parse_for_test(src).expect("bitwise-or in body should parse");
+        assert_eq!(fsm.states[0].name, "Active");
+        // The process block text should contain the body's bitwise-or expression.
+        assert!(fsm.states[0].process_block.contains("flags"));
     }
 
     #[test]

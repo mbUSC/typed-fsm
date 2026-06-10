@@ -1,6 +1,0 @@
-stateDiagram-v2
-
-    Red --> Green : TrafficEvent#colon;#colon;TimerTick<br/>[ if ctx.tick_count >= 3 and state.is_safe_for_ew_green() ]
-    Green --> Yellow : TrafficEvent#colon;#colon;TimerTick<br/>[ if ctx.tick_count >= 4 ]
-    Green --> Red : TrafficEvent#colon;#colon;Emergency
-    Yellow --> Red : TrafficEvent#colon;#colon;TimerTick<br/>[ if ctx.tick_count >= 1 ]

@@ -1,5 +1,0 @@
-stateDiagram-v2
-
-    Locked --> Unlocked : DoorEvent#colon;#colon;EnterCode<br/>{ code }<br/>[ if ctx.authorized_codes.contains(code) ]
-    Locked --> Unlocked : DoorEvent#colon;#colon;EmergencyOpen
-    Unlocked --> Locked : DoorEvent#colon;#colon;Lock

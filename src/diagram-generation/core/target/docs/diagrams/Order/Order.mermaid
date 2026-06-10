@@ -1,6 +1,0 @@
-stateDiagram-v2
-
-    Draft --> PendingPayment : OrderEvent#colon;#colon;Submit
-    PendingPayment --> Paid : OrderEvent#colon;#colon;PaymentReceived
-    PendingPayment --> Cancelled : OrderEvent#colon;#colon;Cancel
-    Paid --> Completed : OrderEvent#colon;#colon;Ship

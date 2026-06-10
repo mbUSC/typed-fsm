@@ -5,8 +5,9 @@ use std::fs;
 use std::path::Path;
 use ra_ap_syntax::{ast::{self, AstNode, HasName}, match_ast, SourceFile, Edition};
 use typed_fsm_diagram_core::{
-    analyze_function, collect_referenced_fsms, generate_mermaid_hierarchical,
-    generate_mermaid_simple, parse_macro_body, FsmDefinition, FunctionRegistry,
+    analyze_function, canonical_type_text, collect_referenced_fsms,
+    generate_mermaid_hierarchical, generate_mermaid_simple, parse_macro_body,
+    FsmDefinition, FunctionRegistry,
 };
 use walkdir::WalkDir;
 
@@ -129,15 +130,23 @@ impl WorkspaceFinder {
                                 match field_list {
                                     ast::FieldList::RecordFieldList(list) => {
                                         for field in list.fields() {
-                                            if let (Some(f_name), Some(f_type)) = (field.name(), field.ty()) {
-                                                fields.insert(f_name.text().to_string(), f_type.syntax().text().to_string().replace(" ", ""));
+                                            if let (Some(f_name), Some(f_type)) =
+                                                (field.name(), field.ty())
+                                            {
+                                                fields.insert(
+                                                    f_name.text().to_string(),
+                                                    canonical_type_text(&f_type),
+                                                );
                                             }
                                         }
-                                    },
+                                    }
                                     ast::FieldList::TupleFieldList(list) => {
                                         for (i, field) in list.fields().enumerate() {
                                             if let Some(f_type) = field.ty() {
-                                                fields.insert(i.to_string(), f_type.syntax().text().to_string().replace(" ", ""));
+                                                fields.insert(
+                                                    i.to_string(),
+                                                    canonical_type_text(&f_type),
+                                                );
                                             }
                                         }
                                     }
@@ -148,7 +157,8 @@ impl WorkspaceFinder {
                     },
                     ast::TypeAlias(it) => {
                         if let (Some(name), Some(ty)) = (it.name(), it.ty()) {
-                            self.found_aliases.insert(name.text().to_string(), ty.syntax().text().to_string().replace(" ", ""));
+                            self.found_aliases
+                                .insert(name.text().to_string(), canonical_type_text(&ty));
                         }
                     },
                     ast::Fn(it) => {

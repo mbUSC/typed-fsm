@@ -1,5 +1,0 @@
-stateDiagram-v2
-
-    Idle --> Debouncing : ButtonEvent#colon;#colon;Press
-    Debouncing --> Pressed : ButtonEvent#colon;#colon;CheckTimeout<br/>[ if ctx.timer.is_expired() ]
-    Pressed --> Debouncing : ButtonEvent#colon;#colon;Press

@@ -1,6 +1,0 @@
-stateDiagram-v2
-
-    Wait --> Walk : TrafficEvent#colon;#colon;TimerTick<br/>[ if ctx.button_pressed and state.is_safe_for_pedestrian() ]
-    Walk --> Flash : TrafficEvent#colon;#colon;TimerTick
-    Walk --> Wait : TrafficEvent#colon;#colon;Emergency
-    Flash --> Wait : TrafficEvent#colon;#colon;TimerTick

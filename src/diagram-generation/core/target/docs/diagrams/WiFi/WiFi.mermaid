@@ -1,7 +1,0 @@
-stateDiagram-v2
-
-    Idle --> Connecting : WiFiEvent#colon;#colon;Connect
-    Connecting --> Active : WiFiEvent#colon;#colon;Connected
-    Connecting --> Failed : WiFiEvent#colon;#colon;CheckTimeout<br/>[ if ctx.timer.is_expired() ]
-    Active --> Idle : WiFiEvent#colon;#colon;Disconnect
-    Failed --> Connecting : WiFiEvent#colon;#colon;CheckTimeout<br/>[ if ctx.timer.is_expired() and ctx.retry_count<ctx.max_retries ]

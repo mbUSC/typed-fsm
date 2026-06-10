@@ -1,8 +1,0 @@
-stateDiagram-v2
-
-    Idle --> Monitoring : SensorEvent#colon;#colon;Start
-    Monitoring --> Error : SensorEvent#colon;#colon;DataReady(value)<br/>[ if *value>1000 ]
-    Monitoring --> Idle : SensorEvent#colon;#colon;Stop
-    Monitoring --> Error : SensorEvent#colon;#colon;Error
-    Error --> Monitoring : SensorEvent#colon;#colon;Start
-    Error --> Idle : SensorEvent#colon;#colon;Stop
