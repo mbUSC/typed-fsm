@@ -1250,24 +1250,22 @@ mod tests {
         let input = "a && b || c".to_string();
         assert_eq!(normalize_source(input), "a and b or c");
 
-        let input = "HeaderScheduleEvent :: Apply { resweep , force_occupancy_broadcast , occupancy_changed , }".to_string();
+        let input = "MyEvent :: Variant { field_a , field_b , field_c , }".to_string();
         assert_eq!(
             normalize_source(input),
-            "HeaderScheduleEvent::Apply { resweep, force_occupancy_broadcast, occupancy_changed }",
+            "MyEvent::Variant { field_a, field_b, field_c }",
         );
 
         let input = "Event :: A | Event :: B".to_string();
         assert_eq!(normalize_source(input), "Event::A | Event::B");
 
-        let input = "Apply{a,b,}".to_string();
-        assert_eq!(normalize_source(input), "Apply { a, b }");
+        let input = "Foo{a,b,}".to_string();
+        assert_eq!(normalize_source(input), "Foo { a, b }");
 
-        let input =
-            "HeaderScheduleEvent::Apply{resweep,force_occupancy_broadcast,occupancy_changed,}"
-                .to_string();
+        let input = "MyEvent::Variant{field_a,field_b,field_c,}".to_string();
         assert_eq!(
             normalize_source(input),
-            "HeaderScheduleEvent::Apply { resweep, force_occupancy_broadcast, occupancy_changed }",
+            "MyEvent::Variant { field_a, field_b, field_c }",
         );
     }
 
@@ -1674,6 +1672,83 @@ mod tests {
             .into_iter()
             .map(|t| (t.target, t.label.events))
             .collect()
+    }
+
+    #[test]
+    fn destructured_pattern_gets_br_and_spaces_end_to_end() {
+        // Regression: destructured match patterns must render with a `<br/>`
+        // line break before the brace and a single space between fields. The
+        // old `clean_tokens` pipeline produced the dense form
+        // (`Foo{a,b,c,}`); the new normalize_source + format_label_for_mermaid
+        // pipeline must produce `Foo<br/>{ a, b, c }`. End-to-end through
+        // parse_macro_body → TransitionExtractor → format_label_for_mermaid.
+        let src = r#"
+            state_machine! {
+                Name: MyFsm,
+                States: {
+                    Active => {
+                        process: |_ctx, evt| {
+                            match evt {
+                                MyEvent::Single { x } => Transition::To(Self::Done),
+                                MyEvent::Multi {
+                                    a,
+                                    b,
+                                    c,
+                                    d,
+                                    e,
+                                    f,
+                                    g,
+                                    h,
+                                } => Transition::To(Self::Done),
+                                _ => Transition::None,
+                            }
+                        }
+                    },
+                    Done => { process: |_c, _e| { Transition::None } },
+                }
+            }
+        "#;
+        let fsm = parse_for_test(src).expect("macro should parse");
+        let active = fsm
+            .states
+            .iter()
+            .find(|s| s.name == "Active")
+            .expect("Active state");
+
+        let registry = FunctionRegistry::new();
+        let mut ex = TransitionExtractor::new(
+            "MyFsm".to_string(),
+            "Active".to_string(),
+            true,
+            &registry,
+        );
+        let parse = SourceFile::parse(&active.process_block, Edition::Edition2021);
+        ex.extract(&parse.tree().syntax());
+
+        let labels: Vec<String> = ex
+            .transitions
+            .iter()
+            .map(|t| format_label_for_mermaid(&t.label))
+            .collect();
+
+        let expected_single = "MyEvent#colon;#colon;Single<br/>{ x }";
+        let expected_multi =
+            "MyEvent#colon;#colon;Multi<br/>{ a, b, c, d, e, f, g, h }";
+
+        assert!(
+            labels.iter().any(|l| l == expected_single),
+            "missing properly-rendered single-field destructure\n  \
+             expected: {}\n  got: {:#?}",
+            expected_single,
+            labels,
+        );
+        assert!(
+            labels.iter().any(|l| l == expected_multi),
+            "missing properly-rendered multi-field destructure\n  \
+             expected: {}\n  got: {:#?}",
+            expected_multi,
+            labels,
+        );
     }
 
     #[test]
